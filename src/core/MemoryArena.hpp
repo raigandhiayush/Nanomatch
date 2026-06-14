@@ -14,7 +14,7 @@ namespace Nanomatch{
             explicit MemoryArena(size_t max_orders) : capacity_(max_orders), head_(nullptr){
                 pool_.resize(capacity_);
                 for(size_t i=0; i<capacity_-1; i++){
-                    pool_[i].next = &pool_[i];
+                    pool_[i].next = &pool_[i+1];
                 }
                 pool_[capacity_-1].next=nullptr;
                 head_=&pool_[0];
@@ -34,11 +34,9 @@ namespace Nanomatch{
                 return node;
             }
 
-            inline void deallocate(Order* order) noexcept{
-                if(__builtin_expect((head_==nullptr),0)) return;
-
-                order->next = head_;
-                head_ = order;
+            inline void deallocate(Order* order) noexcept { 
+                order->next = head_; 
+                head_ = order; 
             }
 
             size_t capacity() const noexcept{

@@ -1,0 +1,22 @@
+[  9%] Building CXX object benchmarks/CMakeFiles/engine_benchmark.dir/__/src/core/OrderBook.cpp.o
+[ 18%] Building CXX object tests/CMakeFiles/engine_tests.dir/OrderBookTests.cpp.o
+[ 27%] Building CXX object benchmarks/CMakeFiles/engine_benchmark.dir/EngineBenchmark.cpp.o
+[ 36%] Building CXX object CMakeFiles/nanomatch.dir/src/core/main.cpp.o
+/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/tests/OrderBookTests.cpp: In function ‘void test_fifo_time_priority()’:
+/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/tests/OrderBookTests.cpp:22:28: warning: unused variable ‘level’ [-Wunused-variable]
+   22 |     Nanomatch::PriceLevel& level = book.get_price_level(Nanomatch::Side::SELL, 500);
+      |                            ^~~~~
+/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/tests/OrderBookTests.cpp: In function ‘void test_order_cancellation()’:
+/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/tests/OrderBookTests.cpp:44:28: warning: unused variable ‘level’ [-Wunused-variable]
+   44 |     Nanomatch::PriceLevel& level = book.get_price_level(Nanomatch::Side::BUY, 450);
+      |                            ^~~~~
+[ 45%] Building CXX object CMakeFiles/nanomatch.dir/src/core/OrderBook.cpp.o
+[ 54%] Building CXX object tests/CMakeFiles/engine_tests.dir/__/src/core/OrderBook.cpp.o
+[ 63%] Building CXX object CMakeFiles/nanomatch.dir/src/ingestion/MmapParser.cpp.o
+[ 72%] Linking CXX executable engine_benchmark
+[ 81%] Building CXX object tests/CMakeFiles/engine_tests.dir/__/src/ingestion/MmapParser.cpp.o
+[ 81%] Built target engine_benchmark
+[ 90%] Linking CXX executable nanomatch
+[100%] Linking CXX executable engine_tests
+[100%] Built target nanomatch
+[100%] Built target engine_tests

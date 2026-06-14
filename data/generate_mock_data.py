@@ -2,7 +2,7 @@ import struct
 import random
 
 # Format: char type, uint64 order_id, uint8 side (0=Buy, 1=Sell), uint32 price, uint32 qty
-RECORD_FORMAT = "1sQBIl"
+RECORD_FORMAT = "=1sQBII" # 18 bytes, = for no padding
 
 def generate_million_row_stress_test():
     print("[Generator] Manufacturing 1 million rows with engineered edge cases...")

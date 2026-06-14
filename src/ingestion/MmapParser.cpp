@@ -1,10 +1,29 @@
 #include "ItchProtocols.hpp"
+#include "MmapParser.hpp"
 #include "../core/OrderBook.hpp"
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 namespace Nanomatch{
+    MmapParser::MmapParser(const std::string& fp) { 
+        fd_ = open(fp.c_str(), O_RDONLY); 
+        if (fd_ < 0) throw std::runtime_error("open failed"); 
+        file_size_ = lseek(fd_, 0, SEEK_END); 
+        mmap_ptr_ = mmap(nullptr, file_size_, PROT_READ, MAP_PRIVATE, fd_, 0); 
+        if (mmap_ptr_ == MAP_FAILED) { 
+            close(fd_); 
+            throw std::runtime_error("mmap failed"); 
+        } 
+        records_ = reinterpret_cast<const OrderRecord*>(mmap_ptr_); 
+        record_count_ = file_size_ / sizeof(OrderRecord); 
+    } 
+    
+    MmapParser::~MmapParser() { 
+        if (mmap_ptr_ && mmap_ptr_ != MAP_FAILED) munmap(mmap_ptr_, file_size_); 
+        if (fd_ >= 0) close(fd_); 
+    }
+
     void parse_itch_file(const std::string& filepath, Nanomatch::OrderBook& book) {
         int fd = open(filepath.c_str(), O_RDONLY);
         if (fd < 0) return;
@@ -34,9 +53,8 @@ namespace Nanomatch{
                     uint64_t order_id = bswap64(msg->order_id);
                     uint32_t price = bswap32(msg->price);
                     uint32_t qty = bswap32(msg->shares);
-                    bool is_sell = (msg->side == 'S');
-                    
-                    book.insert_limit_order(order_id, is_sell, price, qty);
+                    Side side = (msg->side == 'S') ? Side::SELL : Side::BUY; 
+                    book.insert_limit_order(order_id, side, price, qty);
                     break;
                 }
                 case 'E': { // Execute Order filling shares

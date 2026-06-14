@@ -43,11 +43,12 @@ private:
 
     void log_loop() {
         Trade event;
-        // Keep draining as long as the engine is running or items remain in the ring buffer
-        while (running_ || queue_.pop(event)) {
-            // Process the 'event' populated by the while statement condition check
-            // file_.write(...) or your binary log serialization format goes here
+        while (running_.load(std::memory_order_acquire) || queue_.pop(event)) {
+            if (queue_.pop(event)) {
+                file_.write(reinterpret_cast<const char*>(&event), sizeof(Trade));
+            }
         }
+        file_.flush();
     }
 };
 }

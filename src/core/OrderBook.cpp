@@ -15,6 +15,22 @@ OrderBook::OrderBook(size_t max_orders, AsyncLogger& logger)
     }
 }
 
+void OrderBook::execute_order(OrderId id, Quantity fill_qty) { 
+    auto it = order_lookup_.find(id); 
+    if (it == order_lookup_.end()) return; 
+    Order* o = it->second; 
+    PriceLevel& level = get_price_level(o->side, o->price); 
+    if (fill_qty >= o->qty) { 
+        remove_from_level(level, o); 
+        order_lookup_.erase(it); 
+        arena_.deallocate(o); 
+    } 
+    else { 
+        o->qty -= fill_qty; 
+        level.total_volume -= fill_qty; 
+    } 
+}
+
 void OrderBook::append_to_level(PriceLevel& level, Order* order) { // O(1)
     order->next = nullptr;
     order->prev = level.tail;
@@ -49,9 +65,10 @@ void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
 
     if (side == Side::BUY) {
         for (auto& level : asks_) {
-            if (level.empty() || level.price > price || remaining_qty == 0) {
+            if (level.price > price || remaining_qty == 0) {
                 break;
             }
+            if(level.empty()) continue;
 
             Order* current_ask = level.head;
             while (current_ask != nullptr && remaining_qty > 0) {

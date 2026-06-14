@@ -1,12 +1,16 @@
-find_package(benchmark REQUIRED)
-
-add_executable(engine_benchmark EngineBenchmark.cpp)
-target_link_libraries(engine_benchmark PRIVATE 
-    benchmark::benchmark 
-    Threads::Threads
-)
-
-# Pull matching core object files
-target_sources(engine_benchmark PRIVATE 
-    ../src/core/OrderBook.cpp
-)
+find_package(benchmark QUIET)
+if(benchmark_FOUND)
+    add_executable(engine_benchmark EngineBenchmark.cpp)
+    target_sources(engine_benchmark PRIVATE
+        ../src/core/OrderBook.cpp
+    )
+    target_include_directories(engine_benchmark PRIVATE
+        ../src/core
+        ../src/ingestion
+        ../src/logging
+    )
+    target_link_libraries(engine_benchmark PRIVATE
+        benchmark::benchmark
+        Threads::Threads
+    )
+endif()
