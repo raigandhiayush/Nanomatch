@@ -1,9 +1,0 @@
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/CMakeFiles/nanomatch.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/CMakeFiles/edit_cache.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/CMakeFiles/rebuild_cache.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/benchmarks/CMakeFiles/engine_benchmark.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/benchmarks/CMakeFiles/edit_cache.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/benchmarks/CMakeFiles/rebuild_cache.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/tests/CMakeFiles/engine_tests.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/tests/CMakeFiles/edit_cache.dir
-/home/ayush-raigandhi/Desktop/nanomatch/Nanomatch/build/tests/CMakeFiles/rebuild_cache.dir

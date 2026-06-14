@@ -1,1 +1,0 @@
-/usr/bin/c++  -O3 -march=native -flto -Wall -Wextra -pthread -O3 -DNDEBUG CMakeFiles/engine_tests.dir/OrderBookTests.cpp.o CMakeFiles/engine_tests.dir/__/src/core/OrderBook.cpp.o CMakeFiles/engine_tests.dir/__/src/ingestion/MmapParser.cpp.o -o engine_tests 

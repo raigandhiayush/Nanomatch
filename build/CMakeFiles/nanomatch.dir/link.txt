@@ -1,1 +1,0 @@
-/usr/bin/c++  -O3 -march=native -flto -Wall -Wextra -pthread -O3 -DNDEBUG CMakeFiles/nanomatch.dir/src/core/main.cpp.o CMakeFiles/nanomatch.dir/src/core/OrderBook.cpp.o CMakeFiles/nanomatch.dir/src/ingestion/MmapParser.cpp.o -o nanomatch 
