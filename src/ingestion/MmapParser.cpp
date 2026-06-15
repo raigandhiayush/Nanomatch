@@ -47,7 +47,7 @@ namespace Nanomatch {
         if (fd_ >= 0) close(fd_); 
     }
 
-    void parse_itch_file(const std::string& filepath, Nanomatch::OrderBook& book) {
+    void parse_itch_file(const std::string& filepath, std::vector<std::unique_ptr<Nanomatch::OrderBook>>& market_books) {
         int fd = open(filepath.c_str(), O_RDONLY);
         if (fd < 0) {
             throw std::runtime_error("ITCH Parser Error: Could not open file at path: " + filepath);
@@ -76,59 +76,93 @@ namespace Nanomatch {
                 case 'A': { // Add Order Unattributed
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchAddOrderMessage*>(payload);
-                    book.insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, bswap32(msg->price), bswap32(msg->shares));
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
+                    
+                    market_books[locate_id]->insert_limit_order(
+                        bswap64(msg->order_id), 
+                        (msg->side == 'S') ? Side::SELL : Side::BUY, 
+                        bswap32(msg->price), 
+                        bswap32(msg->shares)
+                    );
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
                 case 'F': { // Add Order Attributed
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchAddOrderAttributedMessage*>(payload);
-                    book.insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, bswap32(msg->price), bswap32(msg->shares));
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
+                    
+                    market_books[locate_id]->insert_limit_order(
+                        bswap64(msg->order_id), 
+                        (msg->side == 'S') ? Side::SELL : Side::BUY, 
+                        bswap32(msg->price), 
+                        bswap32(msg->shares)
+                    );
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
                 case 'E': { // Order Executed
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderExecutedMessage*>(payload);
-                    book.execute_order(bswap64(msg->order_id), bswap32(msg->shares));
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
+                    
+                    market_books[locate_id]->execute_order(
+                        bswap64(msg->order_id), 
+                        bswap32(msg->shares)
+                    );
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
                 case 'X': { // Order Cancel
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderCancelMessage*>(payload);
-                    book.reduce_order_qty(bswap64(msg->order_id), bswap32(msg->canceled_shares));
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
+                    
+                    market_books[locate_id]->reduce_order_qty(
+                        bswap64(msg->order_id), 
+                        bswap32(msg->canceled_shares)
+                    );
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
                 case 'D': { // Order Delete
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderDeleteMessage*>(payload);
-                    book.cancel_order(bswap64(msg->order_id));
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
+                    
+                    market_books[locate_id]->cancel_order(bswap64(msg->order_id));
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
                 case 'U': { // Order Replace (Atomic Modification)
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderReplaceMessage*>(payload);
+                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
                     
-                    // 1. Locate and extract original order context details
+                    auto& book = market_books[locate_id];
                     uint64_t old_id = bswap64(msg->original_order_id);
-                    uint32_t old_idx = book.get_id_map().find(old_id); 
+                    uint32_t old_idx = book->get_id_map().find(old_id);
                     
                     if (old_idx != NULL_IDX) {
-                        Side original_side = book.get_pool()[old_idx].side;
-                        
-                        // 2. Erase old reference
-                        book.cancel_order(old_id);
-                        
-                        // 3. Inject new order with updated parameters
-                        book.insert_limit_order(bswap64(msg->new_order_id), original_side, bswap32(msg->price), bswap32(msg->shares));
+                        Side original_side = book->get_pool()[old_idx].side;
+                        book->cancel_order(old_id);
+                        book->insert_limit_order(
+                            bswap64(msg->new_order_id), 
+                            original_side, 
+                            bswap32(msg->price), 
+                            bswap32(msg->shares)
+                        );
                     }
+                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                default: // Skip non-book altering message contexts (S, R, H, P, Q)
+                default: // Safely skip administrative/informational frames (S, R, H, P, Q)
                     break;
             }
             

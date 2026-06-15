@@ -5,26 +5,17 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <chrono>
 
 namespace Nanomatch {
 
-// ─── AsyncLogger ──────────────────────────────────────────────────────────
-//
-// Single-producer (matching thread) / single-consumer (background writer
-// thread) ring buffer. enqueue_trade() on the hot path is a single atomic
-// store — no locks, no syscalls, no allocation.
-//
-// The background thread drains the ring and writes a CSV line per trade.
-// start() spins up the writer; stop() signals it to exit and flushes
-// anything left in the buffer on the calling thread.
-
 class AsyncLogger {
 public:
-    explicit AsyncLogger(const std::string& log_file, size_t capacity = 1u << 16)
+    // Expanded baseline capacity to 1u << 22 (~4 million slots) to handle market sweeps safely
+    explicit AsyncLogger(const std::string& log_file, size_t capacity = 1u << 22)
         : capacity_(capacity), mask_(capacity - 1),
           buffer_(capacity), log_file_(log_file)
     {
-        // capacity must be a power of two for the mask trick
     }
 
     ~AsyncLogger() { stop(); }
@@ -42,18 +33,24 @@ public:
     void stop() {
         if (!running_.exchange(false, std::memory_order_acq_rel)) return;
         if (worker_.joinable()) worker_.join();
-        drain();   // flush anything written after the worker's last pass
+        drain();   
         out_.flush();
         out_.close();
     }
 
-    // Hot path — called once per trade from the matching engine.
+    // Hot path — completely non-blocking, but overwrite-safe
     inline void enqueue_trade(const Trade& t) noexcept {
         uint64_t head = head_.load(std::memory_order_relaxed);
+        
+        // Check if ring buffer is full. If so, drop to protect core matching latency.
+        // In production, you would handle drops via an off-path error counter.
+        if (__builtin_expect((head - tail_cached_) >= capacity_, 0)) {
+            tail_cached_ = tail_atomic_.load(std::memory_order_acquire);
+            if ((head - tail_cached_) >= capacity_) {
+                return; // Buffer full, drop trade to preserve matching loops
+            }
+        }
 
-        // Ring is sized large enough that this should never happen in
-        // practice; if the writer falls behind, drop the oldest entry
-        // rather than blocking the matching thread.
         buffer_[head & mask_] = t;
         head_.store(head + 1, std::memory_order_release);
     }
@@ -61,22 +58,26 @@ public:
 private:
     void run() {
         while (running_.load(std::memory_order_acquire)) {
-            if (!drain()) std::this_thread::yield();
+            // Drop core stress by sleeping for 10 microseconds when queue is empty
+            if (!drain()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
         }
     }
 
-    // Writes every trade currently available; returns true if anything
-    // was written.
     bool drain() {
         uint64_t head = head_.load(std::memory_order_acquire);
-        if (tail_ == head) return false;
+        uint64_t tail = tail_atomic_.load(std::memory_order_relaxed);
+        if (tail == head) return false;
 
-        while (tail_ != head) {
-            const Trade& t = buffer_[tail_ & mask_];
+        while (tail != head) {
+            const Trade& t = buffer_[tail & mask_];
             out_ << t.maker_id << ',' << t.taker_id << ','
                  << t.price << ',' << t.qty << ',' << t.timestamp << '\n';
-            ++tail_;
+            ++tail;
         }
+
+        tail_atomic_.store(tail, std::memory_order_release);
         return true;
     }
 
@@ -87,7 +88,11 @@ private:
     std::ofstream       out_;
 
     alignas(64) std::atomic<uint64_t> head_{0};
-    uint64_t            tail_{0};
+    alignas(64) std::atomic<uint64_t> tail_atomic_{0}; 
+    
+    // Thread-local cache of the tail position to minimize cross-thread atomic contention
+    alignas(64) uint64_t tail_cached_{0}; 
+    
     std::atomic<bool>   running_{false};
     std::thread         worker_;
 };

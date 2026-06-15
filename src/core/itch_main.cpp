@@ -4,13 +4,16 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <array>
 
 namespace Nanomatch {
-    void parse_itch_file(const std::string& filepath, Nanomatch::OrderBook& book);
+    void parse_itch_file(const std::string& filepath, std::vector<std::unique_ptr<Nanomatch::OrderBook>>& market_books);
 }
 
 // Global or static vector to collect latency samples without dynamic resizing penalties during the run
 std::vector<uint64_t> latency_samples;
+
+constexpr size_t MAX_TICKERS = 16384;
 
 int main() {
     const std::string itch_file = "data/01302019.NASDAQ_ITCH50";
@@ -22,14 +25,18 @@ int main() {
     std::cout << "[System] Initializing OrderBook & AsyncLogger...\n";
     Nanomatch::AsyncLogger logger(log_file);
     logger.start();
+    std::vector<std::unique_ptr<Nanomatch::OrderBook>> market_books;
+    market_books.reserve(MAX_TICKERS);
 
-    Nanomatch::OrderBook book(1048576, logger);
+    for (size_t i = 0; i < MAX_TICKERS; ++i) {
+        market_books.push_back(std::make_unique<Nanomatch::OrderBook>(1048576, logger));
+    }
 
     std::cout << "[System] Mapping and processing ITCH data stream with latency tracking...\n";
     
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    Nanomatch::parse_itch_file(itch_file, book);
+    Nanomatch::parse_itch_file(itch_file, market_books);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;
