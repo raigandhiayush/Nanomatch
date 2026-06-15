@@ -43,10 +43,14 @@ private:
 
     void log_loop() {
         Trade event;
-        while (running_.load(std::memory_order_acquire) || queue_.pop(event)) {
-            if (queue_.pop(event)) {
+        while (running_.load(std::memory_order_acquire)) {
+            while (queue_.pop(event)) {
                 file_.write(reinterpret_cast<const char*>(&event), sizeof(Trade));
             }
+        }
+        // drain whatever's left after stop()
+        while (queue_.pop(event)) {
+            file_.write(reinterpret_cast<const char*>(&event), sizeof(Trade));
         }
         file_.flush();
     }

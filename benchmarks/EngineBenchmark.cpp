@@ -1,4 +1,5 @@
 #include <benchmark/benchmark.h>
+#include <cmath>
 #include "OrderBook.hpp"
 #include "AsyncLogger.hpp"
 
@@ -25,23 +26,22 @@ static void BM_OrderInsertion(benchmark::State& state) {
     logger.stop();
 }
 
-// Register the benchmark and explicitly demand p50, p90, and p99 statistics
+// Custom Helper: Extracts any arbitrary percentile from the raw sample vector
+auto GetPercentile = [](const std::vector<double>& v, double percentile) -> double {
+    auto copy = v;
+    std::sort(copy.begin(), copy.end());
+    size_t idx = static_cast<size_t>(std::round(copy.size() * percentile));
+    if (idx >= copy.size()) idx = copy.size() - 1;
+    return copy[idx];
+};
+
+// Register your benchmark with the full suite of rigorous stats
 BENCHMARK(BM_OrderInsertion)
-    ->ComputeStatistics("p50", [](const std::vector<double>& v) -> double {
-        auto copy = v;
-        std::sort(copy.begin(), copy.end());
-        return copy[copy.size() * 0.50];
-    })
-    ->ComputeStatistics("p90", [](const std::vector<double>& v) -> double {
-        auto copy = v;
-        std::sort(copy.begin(), copy.end());
-        return copy[copy.size() * 0.90];
-    })
-    ->ComputeStatistics("p99", [](const std::vector<double>& v) -> double {
-        auto copy = v;
-        std::sort(copy.begin(), copy.end());
-        return copy[copy.size() * 0.99];
-    })
-    ->DisplayAggregatesOnly(false); // Keeps the main iterations visible
+    ->ComputeStatistics("p50_median", [](const std::vector<double>& v) { return GetPercentile(v, 0.50); })
+    ->ComputeStatistics("p90",        [](const std::vector<double>& v) { return GetPercentile(v, 0.90); })
+    ->ComputeStatistics("p99",        [](const std::vector<double>& v) { return GetPercentile(v, 0.99); })
+    ->ComputeStatistics("p99.9",      [](const std::vector<double>& v) { return GetPercentile(v, 0.999); })
+    ->ComputeStatistics("max",        [](const std::vector<double>& v) { return *std::max_element(v.begin(), v.end()); })
+    ->DisplayAggregatesOnly(true); // Set to true if you only want to see the stats summary
 
 BENCHMARK_MAIN();
