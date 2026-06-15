@@ -171,6 +171,10 @@ public:
 
     // Called by Engine for partial fills from external feed
     void execute_order(OrderId id, Quantity fill_qty)                          noexcept;
+    // Inside class OrderBook in OrderBook.hpp
+    void reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept;
+    [[nodiscard]] const IdMap& get_id_map() const noexcept { return id_map_; }
+    [[nodiscard]] const OrderPool& get_pool() const noexcept { return pool_; }
 
     // Accessors for benchmarks / tests
     const TopOfBook& tob()         const noexcept { return tob_; }

@@ -305,4 +305,27 @@ void OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
     }
 }
 
+void OrderBook::reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept {
+    uint32_t idx = id_map_.find(id);
+    if (idx == NULL_IDX) return;
+
+    Order& o = pool_[idx];
+    PriceLevel& level = (o.side == Side::BUY) ? bids_[o.price] : asks_[o.price];
+
+    if (cancel_qty >= o.qty) {
+        // If canceling the whole amount or more, treat as full deletion
+        cancel_order(id);
+    } else {
+        o.qty -= cancel_qty;
+        level.total_volume -= cancel_qty;
+        
+        // Maintain TopOfBook metrics
+        if (o.side == Side::BUY && o.price == tob_.best_bid) {
+            tob_.bid_qty = level.total_volume;
+        } else if (o.side == Side::SELL && o.price == tob_.best_ask) {
+            tob_.ask_qty = level.total_volume;
+        }
+    }
+}
+
 } // namespace Nanomatch

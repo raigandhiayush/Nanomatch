@@ -22,7 +22,6 @@ static_assert(sizeof(OrderRecord) == 18);
 
 class MmapParser {
 public:
-    // Leave only declarations here to prevent redefinition errors
     explicit MmapParser(const std::string& path);
     ~MmapParser();
 
