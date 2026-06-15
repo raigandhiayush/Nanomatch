@@ -1,23 +1,31 @@
 #!/bin/bash
 set -e
 
-# Get the directory where this script actually lives (benchmarks/)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-
-# Move to the root Nanomatch folder and create build right there
 cd "$SCRIPT_DIR/.."
-mkdir -p build
-cd build
+mkdir -p build && cd build
 
-echo "[System] Setting CPU Governor to high-performance mode..."
-sudo cpupower frequency-set -g performance || echo "Warning: Could not set CPU governor."
+echo "[System] Disabling ASLR..."
+echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
 
-echo "[System] Configuring and compiling benchmarks..."
+echo "[System] Setting CPU governor to performance..."
+sudo cpupower frequency-set -g performance
+
+echo "[System] Disabling turbo boost..."
+echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
+
+echo "[System] Building benchmarks..."
 cmake -DCMAKE_BUILD_TYPE=Release ..
-make engine_benchmark
+make engine_benchmark -j$(nproc)
 
-echo "[System] Running Google Benchmark pinned strictly to CPU Core 1..."
-taskset -c 1 ./benchmarks/engine_benchmark
+echo "[System] Running benchmark on isolated core 3 with RT priority..."
+ulimit -l unlimited
+sudo chrt -f 99 taskset -c 3 ./benchmarks/engine_benchmark \
+    --benchmark_min_time=3s \
+    --benchmark_repetitions=5 \
+    --benchmark_report_aggregates_only=true
 
-echo "[System] Resetting CPU Governor back to powersave..."
+echo "[System] Restoring system settings..."
+echo 1 | sudo tee /proc/sys/kernel/randomize_va_space
+echo 0 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true
 sudo cpupower frequency-set -g powersave || true

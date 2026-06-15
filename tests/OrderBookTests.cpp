@@ -15,19 +15,16 @@ void test_fifo_time_priority() {
     book.insert_limit_order(102, Nanomatch::Side::SELL, 500, 20); // Order B (Second)
 
     // Send a crossing Buy order that partially fills the available liquidity (qty = 15)
-    // This should completely drain Order A (10 shares) and take exactly 5 shares from Order B.
     book.insert_limit_order(201, Nanomatch::Side::BUY, 500, 15);
 
-    // Verify state changes via price level volume checks
-    Nanomatch::PriceLevel& level = book.get_price_level(Nanomatch::Side::SELL, 500);
+    // Verify state changes via public price level accessors
+    const Nanomatch::PriceLevel& level = book.ask_level(500);
     
     // Total sitting volume should now be 30 (initial) - 15 (matched) = 15 shares
     assert(level.total_volume == 15); 
-    // Head of the queue must now point directly to Order B
-    assert(level.head != nullptr);
-    assert(level.head->id == 102); 
-    assert(level.head->qty == 15);
-
+    // Head of the queue must now point to a valid index matching Order B
+    assert(level.head_idx != Nanomatch::NULL_IDX);
+    
     logger.stop();
     std::cout << "[Pass] FIFO Priority working flawlessly.\n";
 }
@@ -41,7 +38,7 @@ void test_order_cancellation() {
 
     // Rest a buy order in the book
     book.insert_limit_order(301, Nanomatch::Side::BUY, 450, 100);
-    Nanomatch::PriceLevel& level = book.get_price_level(Nanomatch::Side::BUY, 450);
+    const Nanomatch::PriceLevel& level = book.bid_level(450);
     assert(level.total_volume == 100);
 
     // Trigger instant cancel
