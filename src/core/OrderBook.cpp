@@ -115,9 +115,9 @@ void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
     } else {
         for (auto it = bids_.rbegin(); it != bids_.rend(); ++it) {
             auto& level = *it;
-            if (level.empty() || level.price < price || remaining_qty == 0) {
-                break;
-            }
+            if (remaining_qty == 0) break;
+            if (level.price < price) break;
+            if (level.empty()) continue;
 
             Order* current_bid = level.head;
             while (current_bid != nullptr && remaining_qty > 0) {

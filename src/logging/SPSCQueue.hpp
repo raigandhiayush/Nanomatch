@@ -1,7 +1,8 @@
 #pragma once
 #include "Types.hpp"
 #include <atomic>
-#include <vector>
+#include <array>
+#include <memory>
 
 namespace Nanomatch {
     template <typename T, size_t Capacity>
@@ -9,9 +10,7 @@ namespace Nanomatch {
         static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
 
     public:
-        SPSCQueue() : head_(0), tail_(0) {
-            buffer_.resize(Capacity);
-        }
+        SPSCQueue() : head_(0), tail_(0), buffer_(std::make_unique<std::array<T, Capacity>>()) {}
 
         inline bool emplace(const T& item) noexcept {
             const size_t current_tail = tail_.load(std::memory_order_relaxed);
@@ -21,7 +20,7 @@ namespace Nanomatch {
                 return false; 
             }
 
-            buffer_[current_tail & (Capacity - 1)] = item;
+            (*buffer_)[current_tail & (Capacity - 1)] = item;
             tail_.store(current_tail + 1, std::memory_order_release);
             return true;
         }
@@ -31,18 +30,17 @@ namespace Nanomatch {
             const size_t current_tail = tail_.load(std::memory_order_acquire);
 
             if (current_head == current_tail) {
-                return false; 
+                return false;
             }
 
-            item = buffer_[current_head & (Capacity - 1)];
+            item = (*buffer_)[current_head & (Capacity - 1)];
             head_.store(current_head + 1, std::memory_order_release);
             return true;
         }
 
     private:
-        std::vector<T> buffer_;
-        
-        alignas(64) std::atomic<size_t> head_;
-        alignas(64) std::atomic<size_t> tail_;
+        alignas(64) std::atomic<size_t> head_{0};
+        alignas(64) std::atomic<size_t> tail_{0};
+        std::unique_ptr<std::array<T, Capacity>> buffer_;
     };
 }
