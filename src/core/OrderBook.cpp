@@ -64,7 +64,8 @@ void OrderBook::level_remove(PriceLevel& level, uint32_t idx) noexcept {
 // amortized rather than a full PRICE_BAND sweep.
 
 void OrderBook::update_best_bid() noexcept {
-    Price p = tob_.best_bid;
+    Price p = (tob_.best_bid == UINT32_MAX) ? static_cast<Price>(bids_.size() - 1)
+                                             : tob_.best_bid;
     while (true) {
         if (!bids_[p].empty()) {
             tob_.best_bid = p;
@@ -74,7 +75,7 @@ void OrderBook::update_best_bid() noexcept {
         if (p == 0) break;
         --p;
     }
-    tob_.best_bid = 0;
+    tob_.best_bid = UINT32_MAX;
     tob_.bid_qty  = 0;
 }
 
@@ -143,7 +144,7 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 
     while (remaining > 0) {
         Price best = tob_.best_bid;
-        if (best < limit) break;
+        if (best == UINT32_MAX || best < limit) break;
 
         PriceLevel& level = bids_[best];
         if (level.empty()) break;               // no bids at all (best == 0, bids_[0] empty)
@@ -181,7 +182,7 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 // ─── hot path ops ─────────────────────────────────────────────────────────
 
 void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
-    if (price >= bids_.size()) return;   // outside the pre-allocated price band
+    if (tob_.best_bid == UINT32_MAX || price > tob_.best_bid) {return;}   // outside the pre-allocated price band
 
     Quantity remaining;
 

@@ -124,15 +124,16 @@ public:
         while (vals_[slot] != EMPTY && keys_[slot] != key)
             slot = (slot + 1) & mask_;
         if (vals_[slot] == EMPTY) return;
-        // Backshift deletion to preserve probe chains
+
         vals_[slot] = EMPTY;
         uint32_t cur = slot;
         while (true) {
             uint32_t nxt = (cur + 1) & mask_;
             if (vals_[nxt] == EMPTY) break;
             uint32_t nat = hash(keys_[nxt]) & mask_;
-            // Move nxt into cur if nat is not between nxt and cur
-            if (((nxt - nat) & mask_) > ((nxt - cur) & mask_)) {
+            // nxt belongs at nat; if nat is NOT between cur+1 and nxt (wrapping),
+            // then nxt was displaced past cur and should move back
+            if (((nxt - nat) & mask_) >= ((nxt - cur) & mask_)) {
                 keys_[cur] = keys_[nxt];
                 vals_[cur] = vals_[nxt];
                 vals_[nxt] = EMPTY;

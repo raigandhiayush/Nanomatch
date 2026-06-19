@@ -1,5 +1,6 @@
 #include "ItchProtocols.hpp"
 #include "MmapParser.hpp"
+#include "../core/Types.hpp"
 #include "../core/OrderBook.hpp"
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -7,11 +8,19 @@
 #include <unistd.h>
 #include <stdexcept>
 #include <vector>
+#include <cstring>
+#include <memory>
 
+// Share the latency sample vector defined in itch_main.cpp
 extern std::vector<uint64_t> latency_samples;
 
-namespace Nanomatch {
+// Configuration for single-ticker benchmarking (defined in itch_main.cpp)
+extern const std::string TARGET_TICKER;
+extern uint16_t target_locate_id;
 
+namespace Nanomatch {
+    const std::string TARGET_TICKER = "AAPL    "; // Must be exactly 8 characters
+    uint16_t target_locate_id = 0xFFFF;           //
     MmapParser::MmapParser(const std::string& path) { 
         fd_ = open(path.c_str(), O_RDONLY); 
         if (fd_ < 0) 
@@ -47,128 +56,78 @@ namespace Nanomatch {
         if (fd_ >= 0) close(fd_); 
     }
 
-    void parse_itch_file(const std::string& filepath, std::vector<std::unique_ptr<Nanomatch::OrderBook>>& market_books) {
+    void parse_itch_file(const std::string& filepath, OrderBook& book) {
         int fd = open(filepath.c_str(), O_RDONLY);
-        if (fd < 0) {
-            throw std::runtime_error("ITCH Parser Error: Could not open file at path: " + filepath);
-        }
+        if (fd < 0) throw std::runtime_error("Could not open file");
 
         off_t file_size = lseek(fd, 0, SEEK_END);
-        if (file_size <= 0) {
-            close(fd);
-            throw std::runtime_error("ITCH Parser Error: File is empty or path invalid.");
-        }
-        
         void* mmap_ptr = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-        if (mmap_ptr == MAP_FAILED) {
-            close(fd);
-            throw std::runtime_error("ITCH Parser Error: mmap failed.");
-        }
-
+        
         uint8_t* cursor = reinterpret_cast<uint8_t*>(mmap_ptr);
         uint8_t* end_ptr = cursor + file_size;
 
         while (cursor < end_ptr) {
             auto* header = reinterpret_cast<ItchCommonHeader*>(cursor);
             uint8_t* payload = cursor + sizeof(ItchCommonHeader);
-            
+            uint64_t message_count = 0;
             switch (header->message_type) {
-                case 'A': { // Add Order Unattributed
+                case 'A': {
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchAddOrderMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    market_books[locate_id]->insert_limit_order(
-                        bswap64(msg->order_id), 
-                        (msg->side == 'S') ? Side::SELL : Side::BUY, 
-                        bswap32(msg->price), 
-                        bswap32(msg->shares)
-                    );
-                    
+                    book.insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, bswap32(msg->price), bswap32(msg->shares));
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                case 'F': { // Add Order Attributed
+                case 'F': { 
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchAddOrderAttributedMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    market_books[locate_id]->insert_limit_order(
-                        bswap64(msg->order_id), 
-                        (msg->side == 'S') ? Side::SELL : Side::BUY, 
-                        bswap32(msg->price), 
-                        bswap32(msg->shares)
-                    );
-                    
+                    book.insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, bswap32(msg->price), bswap32(msg->shares));
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                case 'E': { // Order Executed
+                case 'E': {
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderExecutedMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    market_books[locate_id]->execute_order(
-                        bswap64(msg->order_id), 
-                        bswap32(msg->shares)
-                    );
-                    
+                    book.execute_order(bswap64(msg->order_id), bswap32(msg->shares));
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                case 'X': { // Order Cancel
+                case 'X': { 
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderCancelMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    market_books[locate_id]->reduce_order_qty(
-                        bswap64(msg->order_id), 
-                        bswap32(msg->canceled_shares)
-                    );
-                    
+                    book.reduce_order_qty(bswap64(msg->order_id), bswap32(msg->canceled_shares));
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                case 'D': { // Order Delete
+                case 'D': { 
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderDeleteMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    market_books[locate_id]->cancel_order(bswap64(msg->order_id));
-                    
+                    book.cancel_order(bswap64(msg->order_id));
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                case 'U': { // Order Replace (Atomic Modification)
+                case 'U': { 
                     uint64_t t0 = Nanomatch::rdtsc();
                     auto* msg = reinterpret_cast<ItchOrderReplaceMessage*>(payload);
-                    uint16_t locate_id = __builtin_bswap16(msg->stock_locate);
-                    
-                    auto& book = market_books[locate_id];
                     uint64_t old_id = bswap64(msg->original_order_id);
-                    uint32_t old_idx = book->get_id_map().find(old_id);
+                    uint32_t old_idx = book.get_id_map().find(old_id);
                     
                     if (old_idx != NULL_IDX) {
-                        Side original_side = book->get_pool()[old_idx].side;
-                        book->cancel_order(old_id);
-                        book->insert_limit_order(
-                            bswap64(msg->new_order_id), 
-                            original_side, 
-                            bswap32(msg->price), 
-                            bswap32(msg->shares)
-                        );
+                        Side original_side = book.get_pool()[old_idx].side;
+                        book.cancel_order(old_id);
+                        book.insert_limit_order(bswap64(msg->new_order_id), original_side, bswap32(msg->price), bswap32(msg->shares));
                     }
-                    
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
-                default: // Safely skip administrative/informational frames (S, R, H, P, Q)
+                default:
                     break;
             }
-            
             cursor += sizeof(uint16_t) + __builtin_bswap16(header->packet_length);
+            if (__builtin_expect(++message_count % 500000 == 0, 0)) {
+                std::this_thread::yield();
+            }
         }
-
         munmap(mmap_ptr, file_size);
         close(fd);
     }

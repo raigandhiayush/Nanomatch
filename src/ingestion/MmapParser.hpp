@@ -1,5 +1,6 @@
 #pragma once
 #include "Types.hpp"
+#include "OrderBook.hpp"
 #include <string>
 #include <stdexcept>
 #include <fcntl.h>
@@ -30,12 +31,14 @@ public:
 
     [[nodiscard]] const OrderRecord* get_records() const noexcept { return data_; }
     [[nodiscard]] size_t             count()       const noexcept { return count_; }
-
+    void parse_itch_file(const std::string& filepath, OrderBook& book);
 private:
     int                 fd_    {-1};
     size_t              size_  {0};
     size_t              count_ {0};
     const OrderRecord* data_  {nullptr};
 };
+    extern const std::string TARGET_TICKER;
+    extern uint16_t target_locate_id;
 
 } // namespace Nanomatch

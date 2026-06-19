@@ -21,6 +21,26 @@ struct ItchAddOrderMessage {
     uint32_t price;
 };
 
+struct ItchStockDirectoryMessage {
+    uint16_t stock_locate;
+    uint16_t tracking_number;
+    uint64_t timestamp;
+    char     stock[8]; // The 8-character alphanumeric ticker pad (e.g., "AAPL    ")
+    char     market_category;
+    char     financial_status_indicator;
+    uint32_t round_lot_size;
+    char     round_lots_only;
+    char     issue_classification;
+    char     issue_subtype[2];
+    char     authenticity;
+    char     short_sale_threshold_indicator;
+    char     ipo_flag;
+    char     luld_reference_price_tier;
+    char     etp_flag;
+    uint32_t etp_leverage_factor;
+    char     inverse_indicator;
+};
+
 struct ItchAddOrderAttributedMessage {
     uint16_t stock_locate;
     uint16_t tracking_number;
