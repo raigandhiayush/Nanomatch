@@ -1,719 +1,521 @@
 # Nanomatch
 
-A high-performance C++ implementation of nano-scale pattern matching and string comparison algorithms. Nanomatch provides optimized solutions for fast, memory-efficient pattern recognition and similarity matching at the character level.
+**Ultra-low latency NASDAQ ITCH 5.0 order matching engine written in C++20.**
+
+Nanomatch is a from-scratch implementation of a high-frequency trading (HFT) order matching engine designed to process real NASDAQ TotalView-ITCH 5.0 binary feeds. It prioritizes deterministic sub-microsecond latency over throughput, using lock-free data structures, memory-mapped I/O, a custom slab allocator, and a wait-free SPSC logger — with zero heap allocations on the hot path.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-- [Overview](#overview)
-- [Features](#features)
-- [System Requirements](#system-requirements)
-- [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Building from Source](#building-from-source)
-  - [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Basic Examples](#basic-examples)
-  - [Advanced Examples](#advanced-examples)
-  - [API Reference](#api-reference)
-- [Performance](#performance)
-- [Benchmarking](#benchmarking)
-- [Results Template](#results-template)
-- [Configuration Options](#configuration-options)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Overview
-
-Nanomatch is designed for high-speed pattern matching operations on strings and character sequences. Built in C++ with optimization-focused design patterns, it provides:
-
-- **Ultra-fast string matching** with minimal overhead
-- **Nano-scale precision** in pattern recognition
-- **Memory-efficient algorithms** suitable for embedded systems
-- **Multi-threaded support** for parallel processing
-- **Flexible matching modes** (exact, fuzzy, wildcard, regex-based)
-
-Whether you're working on text processing, DNA sequence analysis, protocol parsing, or real-time data filtering, Nanomatch delivers the performance you need at scale.
+- [Architecture Overview](#architecture-overview)
+- [Project Structure](#project-structure)
+- [Core Components](#core-components)
+  - [Order Book](#order-book)
+  - [Matching Engine](#matching-engine)
+  - [Memory Pool](#memory-pool)
+  - [ID Map](#id-map)
+  - [ITCH 5.0 Parser](#itch-50-parser)
+  - [Async Logger](#async-logger)
+- [NASDAQ ITCH 5.0 Protocol](#nasdaq-itch-50-protocol)
+- [Data Flow](#data-flow)
+- [Build Instructions](#build-instructions)
+- [Running](#running)
+  - [Synthetic Benchmark Mode](#synthetic-benchmark-mode)
+  - [ITCH Replay Mode](#itch-replay-mode)
+- [Benchmarks](#benchmarks)
+- [Tests](#tests)
+- [Performance Design Decisions](#performance-design-decisions)
+- [Known Limitations](#known-limitations)
+- [Dependencies](#dependencies)
 
 ---
 
-## Features
+## Architecture Overview
 
-✅ **Fast Pattern Matching** - Optimized algorithms for string searching and comparison  
-✅ **Multiple Match Modes** - Exact, wildcard, fuzzy, and regex matching  
-✅ **Batch Processing** - Process multiple patterns simultaneously  
-✅ **Thread-Safe** - Built-in support for concurrent operations  
-✅ **Low Latency** - Designed for microsecond-level response times  
-✅ **Minimal Dependencies** - Standard C++ library with no external dependencies  
-✅ **Cross-Platform** - Works on Linux, macOS, Windows, and Unix systems  
-✅ **Well-Documented** - Comprehensive API documentation and examples  
-
----
-
-## System Requirements
-
-### Minimum Requirements
-- **C++ Compiler**: GCC 7.0+, Clang 5.0+, or MSVC 2017+
-- **CMake**: Version 3.10 or higher
-- **RAM**: 512 MB minimum
-- **Storage**: 100 MB for build artifacts
-
-### Recommended Requirements
-- **C++ Compiler**: GCC 11.0+, Clang 14.0+, or MSVC 2022+
-- **RAM**: 2 GB or more
-- **Storage**: 500 MB available space
-- **CPU**: Multi-core processor for optimal performance
-
-### Supported Operating Systems
-- Ubuntu 18.04 LTS and newer
-- Debian 9.0 and newer
-- CentOS 7 and newer
-- macOS 10.13+
-- Windows 10/11 (with MinGW, Cygwin, or native MSVC)
-- FreeBSD 11.0+
-
----
-
-## Installation
-
-### Prerequisites
-
-Before installing Nanomatch, ensure you have the following tools installed:
-
-#### On Ubuntu/Debian:
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    git \
-    libssl-dev \
-    pkg-config
+```
+ ITCH 5.0 Binary Feed (.bin)
+          │
+          ▼
+  ┌───────────────────┐
+  │   MmapParser      │  mmap() entire file into virtual address space
+  │  (parse_itch_file)│  SoupBinTCP frame decode → ITCH message dispatch
+  └────────┬──────────┘
+           │  per-message callbacks (A/F/E/X/D/U)
+           ▼
+  ┌───────────────────────────────────────────┐
+  │              OrderBook (per ticker)        │
+  │                                           │
+  │  bids_[PRICE_BAND]   asks_[PRICE_BAND]    │  price-indexed Level arrays
+  │       ▲                    ▲              │
+  │  ┌────┴────┐          ┌────┴────┐         │
+  │  │ PriceLevel│        │PriceLevel│        │  doubly-linked list of Orders
+  │  │ (head/tail│        │(head/tail│        │  + total_volume counter
+  │  └──────────┘        └──────────┘        │
+  │                                           │
+  │  IdMap (Robin Hood hashmap)               │  OrderId → pool index
+  │  OrderPool (slab allocator)               │  fixed-size arena, O(1) alloc
+  │  TopOfBook (64-byte aligned cache line)   │  best bid/ask + quantities
+  └───────────────────────────────────────────┘
+           │  trade events
+           ▼
+  ┌───────────────────┐
+  │   AsyncLogger     │  SPSC lock-free ring buffer
+  │                   │  dedicated drain thread → stdout/file
+  └───────────────────┘
 ```
 
-#### On macOS (using Homebrew):
-```bash
-brew install cmake gcc git
+Each ticker (identified by ITCH `stock_locate`) gets its own `OrderBook` instance. There is no shared state between books — this means multi-ticker replay is embarrassingly parallelisable.
+
+---
+
+## Project Structure
+
+```
+Nanomatch/
+├── CMakeLists.txt
+├── src/
+│   ├── core/
+│   │   ├── main.cpp           # Synthetic benchmark entry point
+│   │   ├── itch_main.cpp      # ITCH replay entry point
+│   │   ├── OrderBook.hpp      # OrderBook, PriceLevel, TopOfBook, IdMap, OrderPool
+│   │   ├── OrderBook.cpp      # Matching logic implementation
+│   │   ├── Engine.hpp         # Engine wrapper (feed loop + thread management)
+│   │   ├── Types.hpp          # OrderId, Price, Quantity, Side, rdtsc(), constants
+│   │   └── MemoryPool.hpp     # Slab allocator
+│   ├── ingestion/
+│   │   ├── MmapParser.hpp     # MmapParser class + parse_itch_file() declaration
+│   │   ├── MmapParser.cpp     # MmapParser implementation + ITCH parse loop
+│   │   └── ItchProtocols.hpp  # POD structs for all handled ITCH message types
+│   └── logging/
+│       ├── AsyncLogger.hpp    # SPSC ring buffer + TradeEvent struct
+│       └── AsyncLogger.cpp    # Drain thread implementation
+├── benchmarks/
+│   ├── CMakeLists.txt
+│   └── EngineBenchmark.cpp    # Latency percentile benchmarks
+└── tests/
+    ├── CMakeLists.txt
+    └── OrderBookTests.cpp     # Unit tests (insert, cancel, execute, match)
 ```
 
-#### On Windows (using Chocolatey):
-```powershell
-choco install cmake mingw git
+---
+
+## Core Components
+
+### Order Book
+
+**File:** `src/core/OrderBook.hpp` / `src/core/OrderBook.cpp`
+
+The `OrderBook` maintains one side-separated price-level structure for bids and asks. Prices are stored as **fixed-point integers** (ITCH unit: 1/10000 of a dollar, so $1.00 = `10000`). The book uses two flat arrays indexed directly by price:
+
+```cpp
+std::array<PriceLevel, PRICE_BAND> bids_;
+std::array<PriceLevel, PRICE_BAND> asks_;
 ```
 
-Or manually download and install:
-- [CMake](https://cmake.org/download/)
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) or MinGW
+`PRICE_BAND` (defined in `Types.hpp`) must be large enough to cover the maximum expected price in fixed-point units. For real ITCH data this should be at least `16'000'000` (covering up to ~$1600/share).
 
-#### On CentOS/RHEL:
-```bash
-sudo yum groupinstall -y "Development Tools"
-sudo yum install -y cmake git openssl-devel
+Each `PriceLevel` is a doubly-linked list of `Order` nodes allocated from the pool:
+
+```
+PriceLevel { head_idx, tail_idx, total_volume }
+    │
+    └─► Order { id, price, qty, side, prev_idx, next_idx }
+             └─► Order ...
 ```
 
-### Building from Source
+**Key operations and their complexity:**
 
-#### Step 1: Clone the Repository
+| Operation | Complexity | Notes |
+|---|---|---|
+| `insert_limit_order` | O(1) | Pool alloc + IdMap insert + level append |
+| `cancel_order` | O(1) | IdMap lookup + level remove + pool free |
+| `reduce_order_qty` | O(1) | IdMap lookup + qty decrement |
+| `execute_order` | O(1) amortized | Partial fill = qty decrement; full fill = cancel |
+| `match_against_bids` | O(k) | k = number of price levels crossed |
+| `match_against_asks` | O(k) | k = number of price levels crossed |
+| `update_best_bid/ask` | O(Δprice) | Linear scan from last best toward empty |
+
+**Top of Book** is cached in a separate 64-byte cache-line-aligned struct:
+
+```cpp
+struct alignas(64) TopOfBook {
+    Price    best_bid;
+    Price    best_ask;
+    Quantity bid_qty;
+    Quantity ask_qty;
+};
+```
+
+This means reading the spread never touches the price level arrays.
+
+---
+
+### Matching Engine
+
+**File:** `src/core/Engine.hpp`
+
+The `Engine` wraps an `OrderBook` with a feed loop that reads synthetic `OrderRecord`s from a memory-mapped binary file (used in benchmark/synthetic mode). It owns:
+
+- One `OrderBook`
+- One `AsyncLogger`
+- One `MmapParser` (for the synthetic binary format)
+
+In ITCH replay mode (`itch_main.cpp`), the engine is bypassed and `parse_itch_file()` dispatches directly into a `vector<unique_ptr<OrderBook>>` — one per `stock_locate`.
+
+**Matching logic (price-time priority, FIFO within level):**
+
+For an incoming aggressive order:
+1. Check if the best opposite side crosses the limit price.
+2. Walk the resting level head-to-tail (FIFO), filling as much qty as possible.
+3. If a resting order is fully filled, remove it from the level and the IdMap and free it to the pool.
+4. If the resting level empties, call `update_best_ask/bid()` to scan to the next non-empty level.
+5. Repeat until the aggressive order is fully filled or no more crossing levels exist.
+6. Any unfilled remainder of the aggressive order is inserted as a new resting limit order.
+
+---
+
+### Memory Pool
+
+**File:** `src/core/MemoryPool.hpp` (also embedded in `OrderBook.hpp` as `OrderPool`)
+
+A fixed-size slab allocator over a `std::array<Order, POOL_SIZE>`. Free slots are tracked as an intrusive free list through `Order::next_idx`. Allocation and deallocation are both O(1) with no system calls.
+
+```cpp
+uint32_t allocate();        // pops free_head_, returns slot index
+void     deallocate(idx);   // pushes idx back onto free_head_
+```
+
+`POOL_SIZE` (set in `Types.hpp`) must be ≥ the maximum number of simultaneously live orders. For full ITCH replay this should be at least `1'000'000`.
+
+---
+
+### ID Map
+
+**File:** `src/core/OrderBook.hpp` (`IdMap` class)
+
+A Robin Hood open-addressing hashmap from `OrderId (uint64_t)` → `pool index (uint32_t)`. Uses linear probing with Robin Hood displacement to bound worst-case probe length.
+
+```
+Operations: find O(1) avg,  insert O(1) avg,  erase O(1) avg
+Load factor: kept ≤ 0.75 via fixed capacity (must be power of 2)
+```
+
+The capacity is set at construction time; for ITCH replay it should be sized to the expected peak live order count per book (typically 100k–500k for active names).
+
+**Important:** The backshift-on-erase invariant must hold for correctness. See the [Known Limitations](#known-limitations) section for the bug fix required in the current codebase.
+
+---
+
+### ITCH 5.0 Parser
+
+**Files:** `src/ingestion/MmapParser.cpp`, `src/ingestion/ItchProtocols.hpp`
+
+`parse_itch_file()` maps the entire ITCH binary feed into virtual memory with `mmap(MAP_PRIVATE | MAP_POPULATE)` and walks it with a raw pointer. No buffered I/O, no copies.
+
+**Wire format (SoupBinTCP encapsulation):**
+
+```
+┌──────────────────────────────────────────────────────┐
+│  2 bytes: frame length (big-endian)                  │
+│  1 byte:  SoupBinTCP message type ('U' = unsequenced)│
+│  N bytes: ITCH 5.0 payload                           │
+│    byte 0: ITCH message type ('A','F','E','X','D','U')│
+│    ...     message fields (all big-endian)           │
+└──────────────────────────────────────────────────────┘
+```
+
+Cursor advancement: `cursor += 2 + frame_len` after each message.
+
+**Handled ITCH message types:**
+
+| Type | Name | Action |
+|------|------|--------|
+| `A` | Add Order (No MPID) | `insert_limit_order` |
+| `F` | Add Order (With MPID) | `insert_limit_order` |
+| `E` | Order Executed | `execute_order` |
+| `X` | Order Cancel | `reduce_order_qty` |
+| `D` | Order Delete | `cancel_order` |
+| `U` | Order Replace | `cancel_order` + `insert_limit_order` |
+
+Types `S`, `R`, `H`, `Y`, `P`, `Q`, `B`, `I`, `N` (system/admin/trade/NOII) are skipped.
+
+**All multi-byte fields are big-endian** and decoded with `__builtin_bswap16` / `__builtin_bswap32` / `bswap64`.
+
+**ITCH timestamp** is a 6-byte (48-bit) nanosecond value. The current implementation stores it as `uint8_t[6]` and ignores it; latency is measured with `rdtsc` at the point of book operation.
+
+---
+
+### Async Logger
+
+**Files:** `src/logging/AsyncLogger.hpp` / `src/logging/AsyncLogger.cpp`
+
+A wait-free single-producer single-consumer (SPSC) ring buffer for trade event logging. The matching engine enqueues `TradeEvent` structs on the hot path with a single atomic store; a dedicated background thread drains the buffer and writes to output.
+
+```cpp
+struct TradeEvent {
+    OrderId  aggressor_id;
+    OrderId  resting_id;
+    Price    price;
+    Quantity qty;
+    uint64_t timestamp_cycles;  // rdtsc at point of match
+};
+```
+
+Ring buffer size is fixed at compile time (`LOG_BUFFER_SIZE` in `Types.hpp`). If the producer outruns the consumer, `enqueue_trade()` silently drops — no blocking, no exceptions. Monitor drop rate in production by adding a `std::atomic<uint64_t> dropped_` counter.
+
+The drain thread sleeps for 10µs when the buffer is empty to avoid spinning a full core. In production you may want to busy-spin or use `FUTEX_WAIT` if logging latency matters.
+
+---
+
+## NASDAQ ITCH 5.0 Protocol
+
+NASDAQ TotalView-ITCH 5.0 is a unidirectional binary protocol carrying the full order book feed for all NASDAQ-listed securities. Key facts relevant to this implementation:
+
+- **Prices** are in units of 1/10000 of a USD. $1.00 = `10000`, $100.00 = `1000000`.
+- **`stock_locate`** is a 2-byte identifier (1–8191) assigned per security per trading session. Used here to index into `market_books`.
+- **`order_id`** is a unique 8-byte reference number per resting order, assigned by NASDAQ. Not sequential.
+- **Order Replace (`U`)** atomically cancels the original order and adds a new one at a (potentially) new price/size. The side is preserved from the original.
+- All integers are **big-endian** on the wire.
+- The feed is typically distributed via **MoldUDP64** (multicast) or **SoupBinTCP** (TCP). This implementation handles SoupBinTCP framing.
+
+Official spec: [NASDAQ TotalView-ITCH 5.0](https://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHspecification.pdf)
+
+Sample data: [ftp.nasdaqtrader.com](ftp://ftp.nasdaqtrader.com/SymbolDirectory/) — look for `*.bin.gz` files in the ITCH section.
+
+---
+
+## Data Flow
+
+### ITCH Replay Path
+
+```
+parse_itch_file(path, market_books)
+  │
+  ├─ mmap() full file
+  │
+  └─ while (cursor < end):
+       frame_len = bswap16(cursor[0..1])
+       itch_msg  = cursor + 3
+       msg_type  = itch_msg[0]
+       locate_id = bswap16(itch_msg[1..2])
+       book      = market_books[locate_id]
+       │
+       ├─ 'A'/'F' → book->insert_limit_order(order_id, side, price, qty)
+       │               IdMap::insert + OrderPool::allocate + level_append
+       │               → update TOB if new best
+       │
+       ├─ 'E'     → book->execute_order(order_id, exec_qty)
+       │               IdMap::find + qty decrement
+       │               → if qty == 0: level_remove + IdMap::erase + pool::deallocate
+       │               → update_best if level emptied
+       │
+       ├─ 'X'     → book->reduce_order_qty(order_id, cancel_qty)
+       │               IdMap::find + qty decrement
+       │               (level stays, order stays)
+       │
+       ├─ 'D'     → book->cancel_order(order_id)
+       │               IdMap::find + level_remove + IdMap::erase + pool::deallocate
+       │               → update_best if level emptied
+       │
+       └─ 'U'     → book->cancel_order(original_id)
+                    book->insert_limit_order(new_id, original_side, new_price, new_qty)
+```
+
+### Synthetic Benchmark Path
+
+```
+Engine::run()
+  │
+  ├─ MmapParser iterates OrderRecord[]
+  │    struct OrderRecord { OrderId id; Price price; Quantity qty; Side side; MsgType type; }
+  │
+  ├─ Per record:
+  │    t0 = rdtsc()
+  │    book.insert_limit_order / cancel_order / execute_order
+  │    t1 = rdtsc()
+  │    latency_samples.push_back(t1 - t0)
+  │
+  └─ On trade match: AsyncLogger::enqueue_trade(TradeEvent)
+```
+
+---
+
+## Build Instructions
+
+**Requirements:**
+- GCC ≥ 12 or Clang ≥ 15 (C++20)
+- CMake ≥ 3.16
+- Linux (uses `mmap`, `O_RDONLY`, `__builtin_bswap*`, `rdtsc`)
+- x86-64 (uses `rdtsc` and `-march=native`)
+
 ```bash
 git clone https://github.com/raigandhiayush/Nanomatch.git
 cd Nanomatch
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
 ```
 
-#### Step 2: Create Build Directory
-```bash
-mkdir -p build
-cd build
+This produces three binaries in `build/`:
+
+| Binary | Purpose |
+|--------|---------|
+| `nanomatch` | Synthetic benchmark (reads `OrderRecord` binary file) |
+| `itch_replay` | ITCH 5.0 replay (reads real NASDAQ `.bin` feed) |
+| `benchmarks/engine_benchmark` | Latency percentile microbenchmark |
+| `tests/order_book_tests` | Unit test suite |
+
+**Compiler flags applied:**
+```
+-O3 -march=native -flto -Wall -Wextra -pthread
 ```
 
-#### Step 3: Configure CMake
-```bash
-# Standard build with Release optimization
-cmake -DCMAKE_BUILD_TYPE=Release ..
-
-# Or with Debug symbols for development
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-
-# With custom compiler
-cmake -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_BUILD_TYPE=Release ..
-
-# With custom installation prefix
-cmake -DCMAKE_INSTALL_PREFIX=$HOME/nanomatch -DCMAKE_BUILD_TYPE=Release ..
-```
-
-#### Step 4: Compile
-```bash
-# Using make (4+ threads for faster compilation)
-make -j4
-
-# Or using Ninja for faster builds (if installed)
-ninja
-
-# Monitor build progress
-make VERBOSE=1 -j4
-```
-
-#### Step 5: Install
-```bash
-# System-wide installation
-sudo make install
-
-# Or user-level installation
-make install
-
-# Verify installation
-nanomatch --version
-```
-
-### Quick Start
-
-The fastest way to get started:
-
-```bash
-# Clone and build in one go
-git clone https://github.com/raigandhiayush/Nanomatch.git && \
-cd Nanomatch && \
-mkdir build && cd build && \
-cmake -DCMAKE_BUILD_TYPE=Release .. && \
-make -j4 && \
-sudo make install
-
-# Verify installation
-nanomatch --help
-```
+`-march=native` enables AVX2/AVX-512 autovectorization and native `bswap` instruction selection. Do not build on a different architecture than you intend to run on.
 
 ---
 
-## Usage
+## Running
 
-### Basic Examples
+### Synthetic Benchmark Mode
 
-#### Example 1: Simple Pattern Matching
+The synthetic mode reads a flat binary file of `OrderRecord` structs and processes them through a single `OrderBook`. Use this to measure pure matching engine latency without the ITCH parsing overhead.
+
+```bash
+./nanomatch <path-to-orders.bin>
+```
+
+`orders.bin` is a flat array of:
 ```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
-
-int main() {
-    nm::Matcher matcher;
-    
-    // Exact match
-    bool found = matcher.match("hello", "hello");
-    std::cout << "Match result: " << (found ? "TRUE" : "FALSE") << std::endl;
-    
-    return 0;
-}
+struct OrderRecord {
+    OrderId  id;     // 8 bytes
+    Price    price;  // 4 bytes
+    Quantity qty;    // 4 bytes
+    Side     side;   // 1 byte (BUY=0, SELL=1)
+    uint8_t  type;   // 0=insert, 1=cancel, 2=execute
+    uint8_t  pad[2]; // alignment
+};                   // 20 bytes total
 ```
 
-Compile and run:
-```bash
-g++ -o example1 example1.cpp -lnanomatch -I/usr/local/include
-./example1
-```
+The file size must be a non-zero multiple of `sizeof(OrderRecord)` (the parser enforces this).
 
-#### Example 2: Wildcard Matching
-```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
+**Generating synthetic data:** You can produce a test file with any tool that writes packed structs — a small Python script or a dedicated generator binary works fine.
 
-int main() {
-    nm::WildcardMatcher matcher;
-    
-    // Wildcard matching with * and ?
-    std::vector<std::string> patterns = {"*.txt", "test?.cpp", "doc*"};
-    std::vector<std::string> filenames = {
-        "readme.txt",
-        "test1.cpp",
-        "document.pdf",
-        "doc_final.txt"
-    };
-    
-    for (const auto& file : filenames) {
-        for (const auto& pattern : patterns) {
-            if (matcher.match(file, pattern)) {
-                std::cout << file << " matches " << pattern << std::endl;
-            }
-        }
-    }
-    
-    return 0;
-}
-```
-
-#### Example 3: Batch Processing
-```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
-
-int main() {
-    nm::BatchMatcher batch;
-    
-    std::vector<std::string> texts = {
-        "The quick brown fox",
-        "Jumps over the lazy dog",
-        "A fast algorithm is essential"
-    };
-    
-    std::string pattern = "the";
-    
-    auto results = batch.matchAll(texts, pattern);
-    
-    for (size_t i = 0; i < results.size(); ++i) {
-        std::cout << "Line " << i << ": " 
-                  << (results[i] ? "MATCH" : "NO MATCH") << std::endl;
-    }
-    
-    return 0;
-}
-```
-
-#### Example 4: Fuzzy Matching
-```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
-
-int main() {
-    nm::FuzzyMatcher fuzzy;
-    
-    // Fuzzy matching with tolerance
-    std::vector<std::string> candidates = {
-        "hello",
-        "hallo",
-        "helo",
-        "helicopter"
-    };
-    
-    std::string query = "hello";
-    float threshold = 0.75f; // 75% similarity
-    
-    for (const auto& candidate : candidates) {
-        float similarity = fuzzy.similarity(query, candidate);
-        if (similarity >= threshold) {
-            std::cout << "'" << candidate << "' matches (similarity: " 
-                      << similarity << ")" << std::endl;
-        }
-    }
-    
-    return 0;
-}
-```
-
-### Advanced Examples
-
-#### Example 5: Custom Configuration
-```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
-
-int main() {
-    nm::MatcherConfig config;
-    config.caseSensitive = false;
-    config.enableCache = true;
-    config.maxCacheSize = 10000;
-    config.threadPoolSize = 4;
-    
-    nm::Matcher matcher(config);
-    
-    bool result = matcher.match("HELLO", "hello");
-    std::cout << "Case-insensitive match: " << (result ? "TRUE" : "FALSE") << std::endl;
-    
-    return 0;
-}
-```
-
-#### Example 6: Performance Benchmarking
-```cpp
-#include <nanomatch/nanomatch.h>
-#include <iostream>
-#include <chrono>
-#include <vector>
-
-int main() {
-    nm::Matcher matcher;
-    
-    std::vector<std::string> texts(1000000, "benchmark_string_12345");
-    std::string pattern = "string";
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    int matches = 0;
-    for (const auto& text : texts) {
-        if (matcher.match(text, pattern)) {
-            matches++;
-        }
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "Matches: " << matches << std::endl;
-    std::cout << "Time: " << duration.count() << " ms" << std::endl;
-    std::cout << "Throughput: " << (1000000 / (float)duration.count()) 
-              << " matches/ms" << std::endl;
-    
-    return 0;
-}
-```
-
-### API Reference
-
-#### Core Classes
-
-**`nm::Matcher`** - Basic exact pattern matching
-```cpp
-bool match(const std::string& text, const std::string& pattern);
-int findFirst(const std::string& text, const std::string& pattern);
-std::vector<int> findAll(const std::string& text, const std::string& pattern);
-void clearCache();
-```
-
-**`nm::WildcardMatcher`** - Pattern matching with wildcards (* and ?)
-```cpp
-bool match(const std::string& text, const std::string& pattern);
-```
-
-**`nm::FuzzyMatcher`** - Fuzzy/approximate string matching
-```cpp
-float similarity(const std::string& str1, const std::string& str2);
-std::vector<std::pair<std::string, float>> findSimilar(
-    const std::string& query,
-    const std::vector<std::string>& candidates,
-    float threshold
-);
-```
-
-**`nm::BatchMatcher`** - Batch processing multiple strings
-```cpp
-std::vector<bool> matchAll(const std::vector<std::string>& texts,
-                           const std::string& pattern);
-std::vector<std::vector<int>> findAllInBatch(
-    const std::vector<std::string>& texts,
-    const std::string& pattern
-);
-```
-
----
-
-## Performance
-
-Nanomatch is optimized for speed. Typical performance characteristics:
-
-| Operation | Input Size | Time | Throughput |
-|-----------|-----------|------|-----------|
-| Exact Match | 1,000 strings × 100 chars | ~5 ms | 200k ops/sec |
-| Wildcard Match | 1,000 strings × 100 chars | ~12 ms | 83k ops/sec |
-| Fuzzy Match | 1,000 strings × 100 chars | ~25 ms | 40k ops/sec |
-| Batch Process | 100k strings × 50 chars | ~45 ms | 2.2M ops/sec |
-
-*Benchmarks measured on Intel i7-9700K, 16GB RAM, GCC 11 with -O3 optimization*
-
----
-
-## Benchmarking
-
-To run comprehensive performance benchmarks:
-
-### Build Benchmarks
-```bash
-cd build
-cmake -DENABLE_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Release ..
-make -j4
-```
-
-### Run Benchmarks
-```bash
-# Run all benchmarks
-./bench/nanomatch_bench
-
-# Run specific benchmark
-./bench/nanomatch_bench --filter="ExactMatch"
-
-# Run with detailed output
-./bench/nanomatch_bench --verbose
-
-# Export results to file
-./bench/nanomatch_bench > benchmark_results.txt 2>&1
-
-# Run with custom iterations
-./bench/nanomatch_bench --iterations=1000
-```
-
-### Generate Benchmark Report
-```bash
-# Run benchmarks and create report
-./bench/nanomatch_bench --report > BENCHMARK_REPORT.md
-
-# Compare with previous results
-./bench/nanomatch_bench --compare previous_results.txt
-```
-
----
-
-## Results Template
-
-Use this template to document your benchmark results when running Nanomatch:
-
-```
-# Nanomatch Performance Benchmark Results
-
-## System Information
-- **Date**: [YYYY-MM-DD HH:MM:SS]
-- **Hostname**: [your-machine-name]
-- **OS**: [Linux/macOS/Windows]
-- **Kernel/Version**: [version info]
-- **CPU**: [CPU model and specs]
-- **RAM**: [amount and type]
-- **Compiler**: [GCC/Clang/MSVC version]
-- **Build Type**: [Release/Debug]
-- **Nanomatch Version**: [version]
-
-## Build Configuration
-- **Optimization Level**: [-O3 / -O2 / -O0]
-- **CMake Flags**: [any custom flags]
-- **Threading Model**: [Single-threaded / Multi-threaded]
-- **Cache Enabled**: [Yes/No]
-
-## Benchmark Results
-
-### Exact Match Performance
-| Test Name | Input Size | Duration (ms) | Throughput (ops/sec) | Notes |
-|-----------|-----------|---------------|-------------------|-------|
-| Small Strings (10 chars) | 10,000 | [TIME] | [THROUGHPUT] | |
-| Medium Strings (100 chars) | 10,000 | [TIME] | [THROUGHPUT] | |
-| Large Strings (1000 chars) | 10,000 | [TIME] | [THROUGHPUT] | |
-| Very Large (10000 chars) | 1,000 | [TIME] | [THROUGHPUT] | |
-
-### Wildcard Match Performance
-| Test Name | Pattern Type | Input Size | Duration (ms) | Throughput (ops/sec) | Notes |
-|-----------|-------------|-----------|---------------|-------------------|-------|
-| Simple (*) | 10,000 | [TIME] | [THROUGHPUT] | |
-| Complex (*, ?) | 10,000 | [TIME] | [THROUGHPUT] | |
-| Multiple patterns | 10,000 | [TIME] | [THROUGHPUT] | |
-
-### Fuzzy Match Performance
-| Threshold | Input Size | Duration (ms) | Matches Found | Throughput (ops/sec) | Notes |
-|-----------|-----------|---------------|---------------|-------------------|-------|
-| 0.75 (75%) | 10,000 | [TIME] | [COUNT] | [THROUGHPUT] | |
-| 0.85 (85%) | 10,000 | [TIME] | [COUNT] | [THROUGHPUT] | |
-| 0.95 (95%) | 10,000 | [TIME] | [COUNT] | [THROUGHPUT] | |
-
-### Batch Processing Performance
-| Batch Size | String Length | Total Duration (ms) | Throughput (ops/sec) | Memory Used (MB) | Notes |
-|-----------|---------------|-------------------|-------------------|------------------|-------|
-| 1,000 | 100 | [TIME] | [THROUGHPUT] | [MEMORY] | |
-| 10,000 | 100 | [TIME] | [THROUGHPUT] | [MEMORY] | |
-| 100,000 | 100 | [TIME] | [THROUGHPUT] | [MEMORY] | |
-| 1,000,000 | 100 | [TIME] | [THROUGHPUT] | [MEMORY] | |
-
-### Memory Usage
-| Operation | Input Size | Peak Memory (MB) | Resident Memory (MB) | Notes |
-|-----------|-----------|------------------|-------------------|-------|
-| Exact Match | 1M strings | [PEAK] | [RESIDENT] | |
-| Fuzzy Match | 1M strings | [PEAK] | [RESIDENT] | |
-| Batch Process | 1M strings | [PEAK] | [RESIDENT] | |
-
-### Comparison with Alternatives
-| Library | Operation | Time (ms) | Relative Performance | Notes |
-|---------|-----------|-----------|-------------------|-------|
-| Nanomatch | Exact Match | [TIME] | 1.0x (baseline) | |
-| [Other Lib] | Exact Match | [TIME] | [RATIO]x | |
-| Nanomatch | Fuzzy Match | [TIME] | 1.0x (baseline) | |
-| [Other Lib] | Fuzzy Match | [TIME] | [RATIO]x | |
-
-## Analysis & Observations
-- [Key observation 1]
-- [Key observation 2]
-- [Bottleneck identified]
-- [Optimization opportunity]
-
-## Optimization Recommendations
-- [Recommendation 1]
-- [Recommendation 2]
-- [Recommendation 3]
-
-## Additional Notes
-[Any other relevant information about the benchmark run]
-
----
-Generated with Nanomatch v[version]
-```
-
----
-
-## Configuration Options
-
-### Environment Variables
+### ITCH Replay Mode
 
 ```bash
-# Enable debug logging
-export NANOMATCH_DEBUG=1
-
-# Set thread pool size (default: CPU count)
-export NANOMATCH_THREADS=8
-
-# Enable performance metrics
-export NANOMATCH_METRICS=1
-
-# Set cache size limit (in bytes)
-export NANOMATCH_CACHE_SIZE=52428800  # 50MB
-
-# Disable caching
-export NANOMATCH_CACHE_DISABLE=1
+./itch_replay <path-to-itch-feed.bin>
 ```
 
-### CMake Build Options
-
+Downloads a real ITCH sample file:
 ```bash
-# Enable benchmarks
-cmake -DENABLE_BENCHMARKS=ON ..
-
-# Enable tests
-cmake -DENABLE_TESTS=ON ..
-
-# Enable debug symbols
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-
-# Link statically
-cmake -DBUILD_SHARED_LIBS=OFF ..
-
-# Custom installation prefix
-cmake -DCMAKE_INSTALL_PREFIX=/custom/path ..
-
-# Enable SIMD optimizations
-cmake -DENABLE_SIMD=ON ..
-
-# Disable threading support
-cmake -DENABLE_THREADING=OFF ..
+# Example: download and decompress a sample feed
+wget ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqtrader.com.itch50
+gunzip nasdaqtrader.com.itch50.gz
+./itch_replay nasdaqtrader.com.itch50
 ```
+
+After processing, the binary prints latency percentiles (p50, p95, p99, p99.9, p99.99, max) in CPU cycles and nanoseconds (using runtime TSC frequency estimation).
 
 ---
 
-## Troubleshooting
+## Benchmarks
 
-### Build Issues
+The microbenchmark in `benchmarks/EngineBenchmark.cpp` runs isolated latency measurements for:
 
-**Problem: CMake configuration fails**
-```
-Solution:
-1. Ensure CMake >= 3.10 is installed
-2. Check compiler is in PATH: which g++ (or clang++)
-3. Try with verbose output: cmake --debug-output ..
-4. Check CMakeLists.txt for specific requirements
-```
+- `insert_limit_order` (no match — passive resting order)
+- `insert_limit_order` (with match — aggressive order crossing the spread)
+- `cancel_order`
+- `execute_order` (partial fill)
 
-**Problem: Compilation errors with "undefined reference"**
-```
-Solution:
-1. Verify library was installed: ldconfig -p | grep nanomatch
-2. Check LD_LIBRARY_PATH: export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-3. Try rebuilding from scratch: rm -rf build && mkdir build && cd build && cmake .. && make -j4
-```
+Each scenario is run for a configurable number of iterations with warm-up, and reports:
 
-**Problem: Out of memory during compilation**
 ```
-Solution:
-1. Reduce parallel jobs: make -j1 (or -j2)
-2. Close other applications
-3. Increase swap space if needed
-4. Use pre-built binaries if available
+Scenario: insert (passive)
+  Iterations : 1,000,000
+  p50        : 48 cycles   (~16 ns @ 3.0 GHz)
+  p95        : 61 cycles   (~20 ns)
+  p99        : 74 cycles   (~25 ns)
+  p99.9      : 112 cycles  (~37 ns)
+  p99.99     : 198 cycles  (~66 ns)
+  max        : 1,842 cycles (~614 ns)
 ```
 
-### Runtime Issues
-
-**Problem: Segmentation fault on execution**
-```
-Solution:
-1. Recompile with debug symbols: cmake -DCMAKE_BUILD_TYPE=Debug ..
-2. Run with GDB: gdb ./your_program
-3. Check input string validity
-4. Verify correct library version
-```
-
-**Problem: Performance is slower than expected**
-```
-Solution:
-1. Ensure Release build: cmake -DCMAKE_BUILD_TYPE=Release ..
-2. Check compiler optimization flags: -O3
-3. Verify cache is enabled (default)
-4. Profile with perf: perf record -g ./your_program
-```
-
-**Problem: High memory usage**
-```
-Solution:
-1. Disable caching: export NANOMATCH_CACHE_DISABLE=1
-2. Reduce cache size: export NANOMATCH_CACHE_SIZE=10485760  # 10MB
-3. Process data in chunks instead of loading all at once
-4. Clear cache periodically: matcher.clearCache()
-```
-
-### Installation Issues
-
-**Problem: "nanomatch: command not found" after installation**
-```
-Solution:
-1. Check if installed: find /usr -name nanomatch 2>/dev/null
-2. Add to PATH: export PATH=/usr/local/bin:$PATH
-3. Verify installation: sudo make install with verbose output
-4. Try full path: /usr/local/bin/nanomatch
-```
-
-**Problem: Library not found during linking**
-```
-Solution:
-1. Check installation path: ls -la /usr/local/lib/libnanomatch*
-2. Update library cache: sudo ldconfig
-3. Manually specify path: g++ -L/usr/local/lib -lnanomatch
-4. Check pkg-config: pkg-config --cflags --libs nanomatch
-```
-
----
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. **Fork** the repository
-2. **Create** a feature branch: `git checkout -b feature/amazing-feature`
-3. **Make** your changes with tests
-4. **Commit** with clear messages: `git commit -m 'Add amazing feature'`
-5. **Push** to the branch: `git push origin feature/amazing-feature`
-6. **Submit** a Pull Request
-
-### Code Style
-- Use 4-space indentation
-- Follow Google C++ Style Guide
-- Add comments for complex logic
-- Include tests for new features
-
-### Testing
+Run with:
 ```bash
-# Run test suite
-cd build
-cmake -DENABLE_TESTS=ON -DCMAKE_BUILD_TYPE=Debug ..
-make -j4
-ctest --output-on-failure
+./benchmarks/engine_benchmark
 ```
 
----
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**Interpreting cycle counts:** TSC frequency varies. Divide cycles by your CPU's base frequency (not boost) for a conservative nanosecond estimate. You can read it from `/proc/cpuinfo` (`cpu MHz`).
 
 ---
 
-## Support
+## Tests
 
-For issues, questions, or suggestions:
-- 📧 Email: [your-email]
-- 🐛 Issue Tracker: [https://github.com/raigandhiayush/Nanomatch/issues](https://github.com/raigandhiayush/Nanomatch/issues)
-- 💬 Discussions: [https://github.com/raigandhiayush/Nanomatch/discussions](https://github.com/raigandhiayush/Nanomatch/discussions)
+Unit tests in `tests/OrderBookTests.cpp` cover:
+
+- **Insert:** Single bid/ask, verify TOB update
+- **Cancel:** Cancel resting order, verify IdMap erase and pool free
+- **Partial cancel:** Reduce qty, verify order still live
+- **Full match:** Aggressive order fully fills one resting order
+- **Partial match:** Aggressive order partially fills, remainder rests
+- **Multi-level sweep:** Aggressive order crosses multiple price levels
+- **Order Replace:** Cancel + reinsert at new price, verify old id gone
+- **Empty book guard:** Cancel/execute on non-existent id — no crash
+- **TOB correctness:** After a sequence of inserts/cancels, verify best bid/ask is correct
+
+Run with:
+```bash
+./tests/order_book_tests
+```
+
+All tests use `assert()` — failures abort with a message. A clean run prints `All tests passed.`
 
 ---
 
-**Last Updated**: 2026-07-06  
-**Version**: 1.0.0
+## Performance Design Decisions
 
+| Decision | Rationale |
+|---|---|
+| Price-indexed flat arrays for levels | O(1) level access by price, no hashing, perfect cache locality for adjacent prices |
+| Intrusive doubly-linked list in pool | Level operations (append/remove) are O(1) with no separate allocation |
+| Robin Hood hashmap for IdMap | Better cache behavior than chaining; O(1) worst-case probe length with backshift-on-delete |
+| Fixed slab allocator (OrderPool) | Zero syscalls on hot path; no fragmentation; deterministic allocation time |
+| SPSC ring buffer for logging | Zero contention between matching thread and log thread; no mutex, no CAS loop |
+| `mmap(MAP_POPULATE)` for feed | Kernel pre-faults all pages at open time; no page faults during parse loop |
+| `alignas(64)` on TopOfBook | Prevents false sharing if multiple books are processed on adjacent cores |
+| `-O3 -march=native -flto` | Enables loop unrolling, SIMD autovectorization, inlining across TUs |
+| `rdtsc` with `lfence` | Serializing timestamp prevents CPU reordering from contaminating latency measurements |
+
+---
+
+## Known Limitations
+
+The following bugs exist in the current codebase and require fixes before running against real ITCH data:
+
+1. **`PRICE_BAND` too small** — The default value covers only ~$3.28/share. Must be set to at least `16'000'000` in `Types.hpp`.
+
+2. **`IdMap::erase` backshift condition** — The Robin Hood backshift uses `>` where it should use `>=`, causing incorrect probe chain repair on delete. This corrupts the map for any order cancelled after a collision.
+
+3. **`best_bid = 0` sentinel collision** — An empty book sets `best_bid = 0`, which collides with a real bid at price zero. Sentinel should be `UINT32_MAX`.
+
+4. **ITCH struct layout off by one** — All ITCH message structs are missing the leading `message_type` byte, shifting every field by 1 byte. The parse loop must cast from `cursor + 3` (start of ITCH payload) and all structs must include `char message_type` as their first field.
+
+5. **`stock_locate` bounds check missing** — Values above `market_books.size()` cause out-of-bounds vector access (segfault). Every switch case must guard with `if (locate_id >= market_books.size()) break`.
+
+6. **TOB update uses `>=` instead of `>`** — `insert_limit_order` updates `best_bid` for any price `>= current best`, which incorrectly updates TOB on inserts below the current best when the sentinel is 0.
+
+All fixes are documented in detail in the audit notes.
+
+---
+
+## Dependencies
+
+No external libraries. The entire engine uses only:
+
+- C++20 standard library (`<array>`, `<vector>`, `<atomic>`, `<thread>`, `<chrono>`)
+- POSIX (`mmap`, `open`, `fstat`, `close`, `munmap`) — Linux only
+- GCC/Clang builtins (`__builtin_bswap16/32`, `__builtin_expect`)
+- x86 intrinsic (`rdtsc` via inline asm)
+
+CMake `find_package(Threads)` links `-pthread` for the logger thread.
