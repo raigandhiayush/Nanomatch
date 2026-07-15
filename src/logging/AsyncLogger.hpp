@@ -1,9 +1,10 @@
 #pragma once
 #include "Types.hpp"
+#include "SPSCQueue.hpp"
 #include <atomic>
 #include <thread>
 #include <fstream>
-#include <vector>
+#include <iostream>
 #include <string>
 #include <chrono>
 
@@ -11,12 +12,9 @@ namespace Nanomatch {
 
 class AsyncLogger {
 public:
-    // Expanded baseline capacity to 1u << 22 (~4 million slots) to handle market sweeps safely
-    explicit AsyncLogger(const std::string& log_file, size_t capacity = 1u << 22)
-        : capacity_(capacity), mask_(capacity - 1),
-          buffer_(capacity), log_file_(log_file)
-    {
-    }
+    static constexpr size_t kCapacity = 1u << 22; // ~4M slots
+
+    explicit AsyncLogger(const std::string& log_file) : log_file_(log_file) {}
 
     ~AsyncLogger() { stop(); }
 
@@ -33,32 +31,29 @@ public:
     void stop() {
         if (!running_.exchange(false, std::memory_order_acq_rel)) return;
         if (worker_.joinable()) worker_.join();
-        drain();   
+        drain();
         out_.flush();
         out_.close();
+        if (dropped_.load(std::memory_order_relaxed) > 0) {
+            std::cerr << "[AsyncLogger] WARNING: " << dropped_.load()
+                      << " trades dropped due to full ring buffer\n";
+        }
     }
 
-    // Hot path — completely non-blocking, but overwrite-safe
+    // Hot path — completely non-blocking, overwrite-safe.
     inline void enqueue_trade(const Trade& t) noexcept {
-        uint64_t head = head_.load(std::memory_order_relaxed);
-        
-        // Check if ring buffer is full. If so, drop to protect core matching latency.
-        // In production, you would handle drops via an off-path error counter.
-        if (__builtin_expect((head - tail_cached_) >= capacity_, 0)) {
-            tail_cached_ = tail_atomic_.load(std::memory_order_acquire);
-            if ((head - tail_cached_) >= capacity_) {
-                return; // Buffer full, drop trade to preserve matching loops
-            }
+        if (!queue_.emplace(t)) {
+            dropped_.fetch_add(1, std::memory_order_relaxed); // drop, don't stall matching
         }
+    }
 
-        buffer_[head & mask_] = t;
-        head_.store(head + 1, std::memory_order_release);
+    uint64_t dropped_count() const noexcept {
+        return dropped_.load(std::memory_order_relaxed);
     }
 
 private:
     void run() {
         while (running_.load(std::memory_order_acquire)) {
-            // Drop core stress by sleeping for 10 microseconds when queue is empty
             if (!drain()) {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
@@ -66,35 +61,23 @@ private:
     }
 
     bool drain() {
-        uint64_t head = head_.load(std::memory_order_acquire);
-        uint64_t tail = tail_atomic_.load(std::memory_order_relaxed);
-        if (tail == head) return false;
-
-        while (tail != head) {
-            const Trade& t = buffer_[tail & mask_];
+        Trade t;
+        bool any = false;
+        while (queue_.pop(t)) {
             out_ << t.maker_id << ',' << t.taker_id << ','
                  << t.price << ',' << t.qty << ',' << t.timestamp << '\n';
-            ++tail;
+            any = true;
         }
-
-        tail_atomic_.store(tail, std::memory_order_release);
-        return true;
+        return any;
     }
 
-    size_t              capacity_;
-    size_t              mask_;
-    std::vector<Trade>  buffer_;
-    std::string         log_file_;
-    std::ofstream       out_;
+    SPSCQueue<Trade, kCapacity> queue_;
+    std::string                 log_file_;
+    std::ofstream               out_;
 
-    alignas(64) std::atomic<uint64_t> head_{0};
-    alignas(64) std::atomic<uint64_t> tail_atomic_{0}; 
-    
-    // Thread-local cache of the tail position to minimize cross-thread atomic contention
-    alignas(64) uint64_t tail_cached_{0}; 
-    
-    std::atomic<bool>   running_{false};
-    std::thread         worker_;
+    std::atomic<uint64_t> dropped_{0};
+    std::atomic<bool>     running_{false};
+    std::thread           worker_;
 };
 
 } // namespace Nanomatch

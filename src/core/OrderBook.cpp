@@ -182,7 +182,7 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 // ─── hot path ops ─────────────────────────────────────────────────────────
 
 void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
-    if (tob_.best_bid == UINT32_MAX || price > tob_.best_bid) {return;}   // outside the pre-allocated price band
+    if (price >= PRICE_BAND) return;   // outside the pre-allocated price band
 
     Quantity remaining;
 

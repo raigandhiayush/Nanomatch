@@ -14,8 +14,8 @@ namespace Nanomatch {
 std::vector<uint64_t> latency_samples;
 
 int main() {
-    const std::string itch_file = "data/01302019.NASDAQ_ITCH50";
-    const std::string log_file  = "build/itch_trade_report.txt";
+    const std::string itch_file = "data/market_data.bin";
+    const std::string log_file  = "build/trade_report.txt";
     
     // Pre-allocate space for 50 million samples to avoid runtime vector resizing overhead
     latency_samples.reserve(50000000);

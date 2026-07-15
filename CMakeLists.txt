@@ -17,10 +17,13 @@ add_executable(nanomatch
     src/core/OrderBook.cpp
     src/ingestion/MmapParser.cpp
 )
-
 target_link_libraries(nanomatch PRIVATE Threads::Threads)
 add_subdirectory(benchmarks)
 add_subdirectory(tests)
 
-add_executable(itch_replay src/core/itch_main.cpp src/ingestion/MmapParser.cpp src/core/OrderBook.cpp)
-target_link_libraries(itch_replay PRIVATE pthread)
+add_executable(itch_replay
+    src/core/itch_main.cpp
+    src/ingestion/ItchParser.cpp
+    src/core/OrderBook.cpp
+)
+target_link_libraries(itch_replay PRIVATE Threads::Threads)

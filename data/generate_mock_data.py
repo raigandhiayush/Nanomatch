@@ -47,11 +47,11 @@ def generate_million_row_stress_test():
             active_ids.pop()
 
     # Write out memory-mapped compatible binary structure
-    with open("data/market_data.bin", "wb") as f:
+    with open("market_data.bin", "wb") as f:
         for rec in records:
             f.write(struct.pack(RECORD_FORMAT, *rec))
             
-    print(f"[Generator] Successfully exported {len(records)} packed records to data/market_data.bin")
+    print(f"[Generator] Successfully exported {len(records)} packed records to market_data.bin")
 
 if __name__ == "__main__":
     generate_million_row_stress_test()
