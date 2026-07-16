@@ -6,33 +6,28 @@
 #include <algorithm>
 
 namespace Nanomatch {
-    // Restored the clean, single-book forward declaration signature
-    void parse_itch_file(const std::string& filepath, Nanomatch::OrderBook& book);
+    void parse_itch_file(const std::string& filepath, AsyncLogger& logger);
 }
 
 // Global vector to collect latency samples without dynamic resizing penalties during the run
 std::vector<uint64_t> latency_samples;
 
-int main() {
-    const std::string itch_file = "data/market_data.bin";
-    const std::string log_file  = "build/trade_report.txt";
+int main(int argc, char* argv[]) {
+    const std::string itch_file = (argc > 1) ? argv[1] : "data/market_data.bin";
+    const std::string log_file  = (argc > 2) ? argv[2] : "build/trade_report.txt";
     
     // Pre-allocate space for 50 million samples to avoid runtime vector resizing overhead
     latency_samples.reserve(50000000);
 
-    std::cout << "[System] Initializing OrderBook & AsyncLogger...\n";
+    std::cout << "[System] Initializing Multi-Ticker OrderBook Engine & AsyncLogger...\n";
     Nanomatch::AsyncLogger logger(log_file);
     logger.start();
-
-    // Instantiate exactly one shared order book container
-    Nanomatch::OrderBook book(1048576, logger);
 
     std::cout << "[System] Mapping and processing ITCH data stream with latency tracking...\n";
     
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Fire the un-filtered parsing stream directly into our lone book
-    Nanomatch::parse_itch_file(itch_file, book);
+    Nanomatch::parse_itch_file(itch_file, logger);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;

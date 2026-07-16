@@ -3,12 +3,28 @@
 
 namespace Nanomatch {
 
-OrderBook::OrderBook(size_t /*max_orders_unused*/, AsyncLogger& logger)
-    : logger_(logger), bids_(PRICE_BAND), asks_(PRICE_BAND)
+static uint32_t round_up_pow2(uint32_t v) noexcept {
+    if (v == 0) return 1;
+    --v;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return v + 1;
+}
+
+OrderBook::OrderBook(size_t price_band, AsyncLogger& logger, size_t max_orders)
+    : pool_(static_cast<uint32_t>(max_orders)),
+      id_map_(round_up_pow2(static_cast<uint32_t>(max_orders) * 2u)),
+      logger_(logger),
+      bids_(price_band),
+      asks_(price_band),
+      bid_bitmap_((price_band + 63) / 64),
+      ask_bitmap_((price_band + 63) / 64)
 {
-    // pool_ and id_map_ use their default capacities (MAX_ORDERS /
-    // MAX_ORDERS*2). bids_/asks_ are pre-sized to the full price band and
-    // never resized again — the array index *is* the price.
+    // pool_ and id_map_ are sized to the expected maximum live order count.
+    // bids_/asks_ are sized to the price band actually needed by the feed.
     for (uint32_t p = 0; p < bids_.size(); ++p) {
         bids_[p].price = p;
         asks_[p].price = p;
@@ -25,6 +41,11 @@ void OrderBook::level_append(PriceLevel& level, uint32_t idx) noexcept {
 
     if (level.head_idx == NULL_IDX) {
         level.head_idx = idx;
+        if (&level == &bids_[o.price]) {
+            bid_bitmap_[o.price >> 6] |= (1ull << (o.price & 63));
+        } else {
+            ask_bitmap_[o.price >> 6] |= (1ull << (o.price & 63));
+        }
     } else {
         pool_[level.tail_idx].next_idx = idx;
     }
@@ -52,8 +73,49 @@ void OrderBook::level_remove(PriceLevel& level, uint32_t idx) noexcept {
     level.total_volume -= o.qty;
     --level.order_count;
 
+    if (level.empty()) {
+        if (&level == &bids_[o.price]) {
+            bid_bitmap_[o.price >> 6] &= ~(1ull << (o.price & 63));
+        } else {
+            ask_bitmap_[o.price >> 6] &= ~(1ull << (o.price & 63));
+        }
+    }
+
     o.next_idx = NULL_IDX;
     o.prev_idx = NULL_IDX;
+}
+
+static inline uint32_t find_prev_set_bit(const std::vector<uint64_t>& bitmap, uint32_t start) noexcept {
+    uint32_t word = start >> 6;
+    uint32_t bit  = start & 63;
+    uint64_t mask = (~uint64_t{0}) >> (63 - bit);
+    uint64_t word_bits = bitmap[word] & mask;
+    while (true) {
+        if (word_bits != 0) {
+            return (word << 6) | (63u - __builtin_clzll(word_bits));
+        }
+        if (word == 0) break;
+        --word;
+        word_bits = bitmap[word];
+    }
+    return UINT32_MAX;
+}
+
+static inline uint32_t find_next_set_bit(const std::vector<uint64_t>& bitmap, uint32_t start) noexcept {
+    uint32_t word = start >> 6;
+    uint32_t bit  = start & 63;
+    uint64_t mask = ~uint64_t{0} << bit;
+    uint64_t word_bits = bitmap[word] & mask;
+    const uint32_t last_word = bitmap.size() - 1;
+    while (true) {
+        if (word_bits != 0) {
+            return (word << 6) | __builtin_ctzll(word_bits);
+        }
+        if (word == last_word) break;
+        ++word;
+        word_bits = bitmap[word];
+    }
+    return UINT32_MAX;
 }
 
 // ─── top-of-book maintenance ─────────────────────────────────────────────
@@ -64,34 +126,29 @@ void OrderBook::level_remove(PriceLevel& level, uint32_t idx) noexcept {
 // amortized rather than a full PRICE_BAND sweep.
 
 void OrderBook::update_best_bid() noexcept {
-    Price p = (tob_.best_bid == UINT32_MAX) ? static_cast<Price>(bids_.size() - 1)
-                                             : tob_.best_bid;
-    while (true) {
-        if (!bids_[p].empty()) {
-            tob_.best_bid = p;
-            tob_.bid_qty  = bids_[p].total_volume;
-            return;
-        }
-        if (p == 0) break;
-        --p;
+    Price start = (tob_.best_bid == UINT32_MAX) ? static_cast<Price>(bids_.size() - 1)
+                                                 : tob_.best_bid;
+    uint32_t next = find_prev_set_bit(bid_bitmap_, start);
+    if (next != UINT32_MAX) {
+        tob_.best_bid = next;
+        tob_.bid_qty  = bids_[next].total_volume;
+    } else {
+        tob_.best_bid = UINT32_MAX;
+        tob_.bid_qty  = 0;
     }
-    tob_.best_bid = UINT32_MAX;
-    tob_.bid_qty  = 0;
 }
 
 void OrderBook::update_best_ask() noexcept {
-    Price p = tob_.best_ask;
-    if (p >= asks_.size()) p = 0;
-    while (p < asks_.size()) {
-        if (!asks_[p].empty()) {
-            tob_.best_ask = p;
-            tob_.ask_qty  = asks_[p].total_volume;
-            return;
-        }
-        ++p;
+    Price start = tob_.best_ask;
+    if (start >= asks_.size()) start = 0;
+    uint32_t next = find_next_set_bit(ask_bitmap_, start);
+    if (next != UINT32_MAX) {
+        tob_.best_ask = next;
+        tob_.ask_qty  = asks_[next].total_volume;
+    } else {
+        tob_.best_ask = UINT32_MAX;
+        tob_.ask_qty  = 0;
     }
-    tob_.best_ask = UINT32_MAX;
-    tob_.ask_qty  = 0;
 }
 
 // ─── matching ─────────────────────────────────────────────────────────────
@@ -113,6 +170,7 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
         while (idx != NULL_IDX && remaining > 0) {
             Order& o = pool_[idx];
             uint32_t next = o.next_idx;
+            if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
@@ -153,6 +211,7 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
         while (idx != NULL_IDX && remaining > 0) {
             Order& o = pool_[idx];
             uint32_t next = o.next_idx;
+            if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
@@ -181,17 +240,17 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 
 // ─── hot path ops ─────────────────────────────────────────────────────────
 
-void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
-    if (price >= PRICE_BAND) return;   // outside the pre-allocated price band
+bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
+    if (price >= bids_.size()) return false;   // outside the configured price band
 
     Quantity remaining;
 
     if (side == Side::BUY) {
         remaining = match_against_asks(id, price, qty);
-        if (remaining == 0) return;
+        if (remaining == 0) return false;
 
         uint32_t idx = pool_.allocate();
-        if (idx == NULL_IDX) return;     // pool exhausted — drop the order
+        if (idx == NULL_IDX) return false;     // pool exhausted — drop the order
 
         Order& o = pool_[idx];
         o.id    = id;
@@ -203,16 +262,17 @@ void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
         level_append(level, idx);
         id_map_.insert(id, idx);
 
-        if (price >= tob_.best_bid) {
+        if (tob_.best_bid == UINT32_MAX || price > tob_.best_bid) {
             tob_.best_bid = price;
             tob_.bid_qty  = level.total_volume;
         }
+        return true;
     } else {
         remaining = match_against_bids(id, price, qty);
-        if (remaining == 0) return;
+        if (remaining == 0) return false;
 
         uint32_t idx = pool_.allocate();
-        if (idx == NULL_IDX) return;
+        if (idx == NULL_IDX) return false;
 
         Order& o = pool_[idx];
         o.id    = id;
@@ -224,10 +284,11 @@ void OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
         level_append(level, idx);
         id_map_.insert(id, idx);
 
-        if (price <= tob_.best_ask) {
+        if (tob_.best_ask == UINT32_MAX || price < tob_.best_ask) {
             tob_.best_ask = price;
             tob_.ask_qty  = level.total_volume;
         }
+        return true;
     }
 }
 
@@ -269,9 +330,9 @@ void OrderBook::process_market_order(Side side, Quantity qty) noexcept {
 
 // ─── external partial-fill path ──────────────────────────────────────────
 
-void OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
+bool OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
     uint32_t idx = id_map_.find(id);
-    if (idx == NULL_IDX) return;
+    if (idx == NULL_IDX) return false;
 
     Order& o     = pool_[idx];
     Side   side  = o.side;
@@ -279,6 +340,7 @@ void OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
     PriceLevel& level = (side == Side::BUY) ? bids_[price] : asks_[price];
 
     if (fill_qty >= o.qty) {
+        logger_.enqueue_trade(Trade{o.id, 0, price, o.qty, rdtsc()});
         level_remove(level, idx);
         id_map_.erase(id);
         pool_.deallocate(idx);
@@ -294,21 +356,24 @@ void OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
                 else                tob_.ask_qty = level.total_volume;
             }
         }
-    } else {
-        o.qty              -= fill_qty;
-        level.total_volume -= fill_qty;
-
-        if (side == Side::BUY && price == tob_.best_bid) {
-            tob_.bid_qty = level.total_volume;
-        } else if (side == Side::SELL && price == tob_.best_ask) {
-            tob_.ask_qty = level.total_volume;
-        }
+        return true;
     }
+
+    logger_.enqueue_trade(Trade{o.id, 0, price, fill_qty, rdtsc()});
+    o.qty              -= fill_qty;
+    level.total_volume -= fill_qty;
+
+    if (side == Side::BUY && price == tob_.best_bid) {
+        tob_.bid_qty = level.total_volume;
+    } else if (side == Side::SELL && price == tob_.best_ask) {
+        tob_.ask_qty = level.total_volume;
+    }
+    return false;
 }
 
-void OrderBook::reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept {
+bool OrderBook::reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept {
     uint32_t idx = id_map_.find(id);
-    if (idx == NULL_IDX) return;
+    if (idx == NULL_IDX) return false;
 
     Order& o = pool_[idx];
     PriceLevel& level = (o.side == Side::BUY) ? bids_[o.price] : asks_[o.price];
@@ -316,17 +381,19 @@ void OrderBook::reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept {
     if (cancel_qty >= o.qty) {
         // If canceling the whole amount or more, treat as full deletion
         cancel_order(id);
-    } else {
-        o.qty -= cancel_qty;
-        level.total_volume -= cancel_qty;
-        
-        // Maintain TopOfBook metrics
-        if (o.side == Side::BUY && o.price == tob_.best_bid) {
-            tob_.bid_qty = level.total_volume;
-        } else if (o.side == Side::SELL && o.price == tob_.best_ask) {
-            tob_.ask_qty = level.total_volume;
-        }
+        return true;
     }
+
+    o.qty -= cancel_qty;
+    level.total_volume -= cancel_qty;
+    
+    // Maintain TopOfBook metrics
+    if (o.side == Side::BUY && o.price == tob_.best_bid) {
+        tob_.bid_qty = level.total_volume;
+    } else if (o.side == Side::SELL && o.price == tob_.best_ask) {
+        tob_.ask_qty = level.total_volume;
+    }
+    return false;
 }
 
 } // namespace Nanomatch

@@ -23,9 +23,9 @@ namespace Nanomatch{
         Price    price;     // 4
         Quantity qty;       // 4
         Side     side;      // 1  — 1-byte fields last
-        uint8_t  _pad[39];  // fill to 64
-    };                    // = 64 bytes exactly
-    static_assert(sizeof(Order) == 64);
+        uint8_t  _pad[7];   // fill to 32
+    };                    // = 32 bytes exactly
+    static_assert(sizeof(Order) == 32);
 
     struct alignas(32) Trade {  // 32-byte align: 2 fit per cache line
         OrderId  maker_id;   // 8

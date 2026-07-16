@@ -77,7 +77,7 @@ private:
 // one line to decide whether a new order crosses.
 
 struct alignas(64) TopOfBook {
-    Price    best_bid {0};
+    Price    best_bid {UINT32_MAX};
     Price    best_ask {UINT32_MAX};
     Quantity bid_qty  {0};
     Quantity ask_qty  {0};
@@ -94,26 +94,24 @@ public:
     static constexpr uint32_t EMPTY = NULL_IDX;
 
     explicit IdMap(uint32_t cap = MAX_ORDERS * 2)
-        : cap_(cap), mask_(cap - 1)
+        : cap_(round_up_pow2(cap)), mask_(cap_ - 1)
     {
-        // cap must be a power of 2
-        keys_.assign(cap_, 0);
-        vals_.assign(cap_, EMPTY);
+        entries_.assign(cap_, Entry{0, EMPTY});
     }
 
     void insert(OrderId key, uint32_t val) noexcept {
         uint32_t slot = hash(key) & mask_;
-        while (vals_[slot] != EMPTY && keys_[slot] != key)
+        while (entries_[slot].val != EMPTY && entries_[slot].key != key)
             slot = (slot + 1) & mask_;
-        keys_[slot] = key;
-        vals_[slot] = val;
+        entries_[slot].key = key;
+        entries_[slot].val = val;
     }
 
     // Returns NULL_IDX if not found
     [[nodiscard]] uint32_t find(OrderId key) const noexcept {
         uint32_t slot = hash(key) & mask_;
-        while (vals_[slot] != EMPTY) {
-            if (keys_[slot] == key) return vals_[slot];
+        while (entries_[slot].val != EMPTY) {
+            if (entries_[slot].key == key) return entries_[slot].val;
             slot = (slot + 1) & mask_;
         }
         return EMPTY;
@@ -121,22 +119,21 @@ public:
 
     void erase(OrderId key) noexcept {
         uint32_t slot = hash(key) & mask_;
-        while (vals_[slot] != EMPTY && keys_[slot] != key)
+        while (entries_[slot].val != EMPTY && entries_[slot].key != key)
             slot = (slot + 1) & mask_;
-        if (vals_[slot] == EMPTY) return;
+        if (entries_[slot].val == EMPTY) return;
 
-        vals_[slot] = EMPTY;
+        entries_[slot].val = EMPTY;
         uint32_t cur = slot;
         while (true) {
             uint32_t nxt = (cur + 1) & mask_;
-            if (vals_[nxt] == EMPTY) break;
-            uint32_t nat = hash(keys_[nxt]) & mask_;
+            if (entries_[nxt].val == EMPTY) break;
+            uint32_t nat = hash(entries_[nxt].key) & mask_;
             // nxt belongs at nat; if nat is NOT between cur+1 and nxt (wrapping),
             // then nxt was displaced past cur and should move back
             if (((nxt - nat) & mask_) >= ((nxt - cur) & mask_)) {
-                keys_[cur] = keys_[nxt];
-                vals_[cur] = vals_[nxt];
-                vals_[nxt] = EMPTY;
+                entries_[cur] = entries_[nxt];
+                entries_[nxt].val = EMPTY;
                 cur = nxt;
             } else {
                 break;
@@ -145,6 +142,22 @@ public:
     }
 
 private:
+    struct Entry {
+        OrderId   key;
+        uint32_t  val;
+    };
+
+    static uint32_t round_up_pow2(uint32_t v) noexcept {
+        if (v <= 1) return 1;
+        --v;
+        v |= v >> 1;
+        v |= v >> 2;
+        v |= v >> 4;
+        v |= v >> 8;
+        v |= v >> 16;
+        return v + 1;
+    }
+
     static uint32_t hash(OrderId key) noexcept {
         // Murmur finalizer — good distribution for sequential IDs
         key ^= key >> 33;
@@ -153,27 +166,26 @@ private:
         return static_cast<uint32_t>(key);
     }
 
-    uint32_t              cap_  {0};
-    uint32_t              mask_ {0};
-    std::vector<OrderId>  keys_;
-    std::vector<uint32_t> vals_;
+    uint32_t             cap_   {0};
+    uint32_t             mask_  {0};
+    std::vector<Entry>   entries_;
 };
 
 // ─── OrderBook ───────────────────────────────────────────────────────────────
 
 class OrderBook {
 public:
-    explicit OrderBook(size_t /*max_orders_unused*/, AsyncLogger& logger);
+    explicit OrderBook(size_t price_band, AsyncLogger& logger, size_t max_orders = MAX_ORDERS);
 
     // Hot path — called on every message
-    void insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept;
+    bool insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept;
     void cancel_order      (OrderId id)                                        noexcept;
     void process_market_order(Side side, Quantity qty)                         noexcept;
 
     // Called by Engine for partial fills from external feed
-    void execute_order(OrderId id, Quantity fill_qty)                          noexcept;
-    // Inside class OrderBook in OrderBook.hpp
-    void reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept;
+    bool execute_order(OrderId id, Quantity fill_qty)                          noexcept;
+    // Returns true if the order was fully removed from the book.
+    bool reduce_order_qty(OrderId id, Quantity cancel_qty) noexcept;
     [[nodiscard]] const IdMap& get_id_map() const noexcept { return id_map_; }
     [[nodiscard]] const OrderPool& get_pool() const noexcept { return pool_; }
 
@@ -190,10 +202,12 @@ private:
     AsyncLogger&           logger_;
 
     // Price-level arrays: indexed directly by Price (fixed-point integer).
-    // Pre-allocated to PRICE_BAND in constructor — no resize ever.
+    // Pre-allocated to the feed's price band in the constructor.
     std::vector<PriceLevel> bids_;        // bids_[p] = level at price p
     std::vector<PriceLevel> asks_;        // asks_[p] = level at price p
 
+    std::vector<uint64_t>   bid_bitmap_;  // one bit per active bid price level
+    std::vector<uint64_t>   ask_bitmap_;  // one bit per active ask price level
     // ── level linked-list helpers (index-based, no pointer chasing) ──────────
     void level_append(PriceLevel& level, uint32_t idx)        noexcept;
     void level_remove(PriceLevel& level, uint32_t idx)        noexcept;

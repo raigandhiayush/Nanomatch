@@ -2,9 +2,9 @@
 #include <iostream>
 #include <chrono>
 
-int main() {
-    const std::string input_file = "data/market_data.bin";
-    const std::string log_file   = "build/trade_report.txt";
+int main(int argc, char* argv[]) {
+    const std::string input_file = (argc > 1) ? argv[1] : "data/market_data.bin";
+    const std::string log_file   = (argc > 2) ? argv[2] : "build/trade_report.txt";
     const size_t price_band      = 100000;   // renamed from max_orders — this is now the
                                               // OrderBook's actual price-band size (see
                                               // OrderBook.hpp ctor), not an order-count cap.

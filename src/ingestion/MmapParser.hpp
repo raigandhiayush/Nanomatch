@@ -31,7 +31,6 @@ public:
 
     [[nodiscard]] const OrderRecord* get_records() const noexcept { return data_; }
     [[nodiscard]] size_t             count()       const noexcept { return count_; }
-    void parse_itch_file(const std::string& filepath, OrderBook& book);
 private:
     int                 fd_    {-1};
     size_t              size_  {0};

@@ -2,7 +2,7 @@
 
 **Ultra-low latency NASDAQ ITCH 5.0 order matching engine written in C++20.**
 
-Nanomatch is a from-scratch implementation of a high-frequency trading (HFT) order matching engine designed to process real NASDAQ TotalView-ITCH 5.0 binary feeds. It prioritizes deterministic sub-microsecond latency over throughput, using lock-free data structures, memory-mapped I/O, a custom slab allocator, and a wait-free SPSC logger — with zero heap allocations on the hot path.
+Nanomatch is a from-scratch implementation of a high-frequency trading (HFT) order matching engine designed to process real NASDAQ TotalView-ITCH 5.0 binary feeds. It prioritizes deterministic sub-microsecond latency over throughput, using lock-free data structures, memory-mapped I/O, a custom slab allocator, and a wait-free SPSC logger — with zero heap allocations on the hot path. A multi-book replay path routes messages by ITCH `stock_locate` so each ticker gets its own `OrderBook` instance.
 
 ---
 
@@ -382,7 +382,7 @@ This produces three binaries in `build/`:
 The synthetic mode reads a flat binary file of `OrderRecord` structs and processes them through a single `OrderBook`. Use this to measure pure matching engine latency without the ITCH parsing overhead.
 
 ```bash
-./nanomatch <path-to-orders.bin>
+./build/nanomatch data/market_data.bin
 ```
 
 `orders.bin` is a flat array of:
@@ -391,20 +391,19 @@ struct OrderRecord {
     OrderId  id;     // 8 bytes
     Price    price;  // 4 bytes
     Quantity qty;    // 4 bytes
-    Side     side;   // 1 byte (BUY=0, SELL=1)
-    uint8_t  type;   // 0=insert, 1=cancel, 2=execute
-    uint8_t  pad[2]; // alignment
-};                   // 20 bytes total
+    uint8_t  side;   // 1 byte (BUY=0, SELL=1)
+    char     type;   // 'L'=limit, 'M'=market, 'C'=cancel
+};                   // 18 bytes total
 ```
 
 The file size must be a non-zero multiple of `sizeof(OrderRecord)` (the parser enforces this).
 
-**Generating synthetic data:** You can produce a test file with any tool that writes packed structs — a small Python script or a dedicated generator binary works fine.
+**Generating synthetic data:** The bundled Python generator writes a compatible feed to `data/market_data.bin` by default.
 
 ### ITCH Replay Mode
 
 ```bash
-./itch_replay <path-to-itch-feed.bin>
+./build/itch_replay <path-to-itch-feed.bin>
 ```
 
 Downloads a real ITCH sample file:
@@ -412,7 +411,7 @@ Downloads a real ITCH sample file:
 # Example: download and decompress a sample feed
 wget ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqtrader.com.itch50
 gunzip nasdaqtrader.com.itch50.gz
-./itch_replay nasdaqtrader.com.itch50
+./build/itch_replay nasdaqtrader.com.itch50
 ```
 
 After processing, the binary prints latency percentiles (p50, p95, p99, p99.9, p99.99, max) in CPU cycles and nanoseconds (using runtime TSC frequency estimation).
