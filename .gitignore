@@ -1,2 +1,8 @@
 build/
-build/
+
+# Large generated binary market data — regenerate locally with
+# `python3 data/generate_mock_data.py` instead of committing it.
+# An 18MB raw binary sitting in the repo is what was making VSCode
+# choke (file watcher / git status / search indexing all try to hash
+# and diff it on every keystroke).
+data/*.bin
