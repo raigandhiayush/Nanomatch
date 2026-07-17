@@ -24,11 +24,12 @@ OrderBook::OrderBook(size_t price_band, AsyncLogger& logger, size_t max_orders)
       ask_bitmap_((price_band + 63) / 64)
 {
     // pool_ and id_map_ are sized to the expected maximum live order count.
-    // bids_/asks_ are sized to the price band actually needed by the feed.
-    for (uint32_t p = 0; p < bids_.size(); ++p) {
-        bids_[p].price = p;
-        asks_[p].price = p;
-    }
+    // bids_/asks_ are sized to price_band slots in the *relative* sliding
+    // window (see base_ in the header) -- base_ isn't known yet (it's
+    // anchored to whichever price the first order carries), so there's
+    // nothing to precompute per-slot here anymore. Levels default-construct
+    // to price 0 / empty, which is fine since price_idx is always derived
+    // from base_ + relative index on demand, never read from the level.
 }
 
 // ─── level linked-list helpers ───────────────────────────────────────────
@@ -39,12 +40,14 @@ void OrderBook::level_append(PriceLevel& level, uint32_t idx) noexcept {
     o.prev_idx = level.tail_idx;
     o.next_idx = NULL_IDX;
 
+    long price_idx = to_idx(o.price);   // slot in the relative sliding window
+
     if (level.head_idx == NULL_IDX) {
         level.head_idx = idx;
-        if (&level == &bids_[o.price]) {
-            bid_bitmap_[o.price >> 6] |= (1ull << (o.price & 63));
+        if (&level == &bids_[price_idx]) {
+            bid_bitmap_[price_idx >> 6] |= (1ull << (price_idx & 63));
         } else {
-            ask_bitmap_[o.price >> 6] |= (1ull << (o.price & 63));
+            ask_bitmap_[price_idx >> 6] |= (1ull << (price_idx & 63));
         }
     } else {
         pool_[level.tail_idx].next_idx = idx;

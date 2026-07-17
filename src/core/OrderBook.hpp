@@ -191,8 +191,8 @@ public:
 
     // Accessors for benchmarks / tests
     const TopOfBook& tob()         const noexcept { return tob_; }
-    const PriceLevel& bid_level(Price p) const noexcept { return bids_[p]; }
-    const PriceLevel& ask_level(Price p) const noexcept { return asks_[p]; }
+    const PriceLevel& bid_level(Price p) const noexcept { return bids_[to_idx(p)]; }
+    const PriceLevel& ask_level(Price p) const noexcept { return asks_[to_idx(p)]; }
 
 private:
     // ── data members in access-frequency order ───────────────────────────────
@@ -201,10 +201,34 @@ private:
     IdMap                  id_map_;       // O(1) id → pool index
     AsyncLogger&           logger_;
 
-    // Price-level arrays: indexed directly by Price (fixed-point integer).
-    // Pre-allocated to the feed's price band in the constructor.
-    std::vector<PriceLevel> bids_;        // bids_[p] = level at price p
-    std::vector<PriceLevel> asks_;        // asks_[p] = level at price p
+    // ── relative sliding price band ───────────────────────────────────────────
+    //
+    // Bug fix / memory fix: bids_/asks_ used to be indexed directly by the
+    // ABSOLUTE price (bids_[price]), so the array had to span [0, price_band)
+    // starting at $0 -- to hold a $250 stock you needed price_band > 2,500,000
+    // ticks, and a cheap $2 stock wasted almost the entire array. Ported from
+    // github.com/Amarjyoti-Chakravorty/NanoMatch: bids_/asks_ are now indexed
+    // by (price - base_), where base_ is anchored to wherever the ticker
+    // actually trades (set from the first order this book ever sees, centered
+    // so that price sits mid-array). This means a small, fixed-size window
+    // (e.g. price_band=200,000 -> a $20 span at ITCH's $0.0001 tick size)
+    // works for ANY ticker regardless of its absolute price level, instead of
+    // needing a window sized to the most expensive stock you might see.
+    Price   base_       {0};
+    bool    base_set_   {false};
+
+    [[nodiscard]] long to_idx(Price p) const noexcept {
+        return static_cast<long>(p) - static_cast<long>(base_);
+    }
+    [[nodiscard]] bool in_band(long idx) const noexcept {
+        return idx >= 0 && idx < static_cast<long>(bids_.size());
+    }
+
+    // Price-level arrays: indexed by (price - base_), a relative slot in the
+    // sliding window, not by absolute price. Sized to the configured band
+    // width in the constructor.
+    std::vector<PriceLevel> bids_;        // bids_[idx] = level at price (base_+idx)
+    std::vector<PriceLevel> asks_;        // asks_[idx] = level at price (base_+idx)
 
     std::vector<uint64_t>   bid_bitmap_;  // one bit per active bid price level
     std::vector<uint64_t>   ask_bitmap_;  // one bit per active ask price level
