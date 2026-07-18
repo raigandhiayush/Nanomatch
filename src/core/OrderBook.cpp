@@ -40,10 +40,12 @@ void OrderBook::level_append(PriceLevel& level, uint32_t idx) noexcept {
     o.prev_idx = level.tail_idx;
     o.next_idx = NULL_IDX;
 
-    long price_idx = to_idx(o.price);   // slot in the relative sliding window
+    // o.price stores the relative index into bids_/asks_. Use it directly.
+    uint32_t price_idx = o.price; // relative index in the sliding window
 
     if (level.head_idx == NULL_IDX) {
         level.head_idx = idx;
+        // if we appended into an empty level, set the corresponding bitmap bit
         if (&level == &bids_[price_idx]) {
             bid_bitmap_[price_idx >> 6] |= (1ull << (price_idx & 63));
         } else {
@@ -162,6 +164,7 @@ void OrderBook::update_best_ask() noexcept {
 
 Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity qty) noexcept {
     Quantity remaining = qty;
+    static std::atomic<uint64_t> debug_trades{0};
 
     while (remaining > 0) {
         Price best = tob_.best_ask;
@@ -176,6 +179,11 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
             if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
+            uint64_t ct = debug_trades.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 16) {
+                std::fprintf(stderr, "MATCH ask maker=%llu taker=%llu price=%u qty=%u level_price=%u\n",
+                             (unsigned long long)o.id, (unsigned long long)taker_id, o.price, match_qty, level.price);
+            }
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
 
             remaining        -= match_qty;
@@ -186,6 +194,7 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
                 level_remove(level, idx);
                 id_map_.erase(o.id);
                 pool_.deallocate(idx);
+                if (live_order_count_ > 0) --live_order_count_;
             }
             idx = next;
         }
@@ -202,6 +211,7 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
 
 Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity qty) noexcept {
     Quantity remaining = qty;
+    static std::atomic<uint64_t> debug_trades_b{0};
 
     while (remaining > 0) {
         Price best = tob_.best_bid;
@@ -217,6 +227,11 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
             if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
+            uint64_t ct = debug_trades_b.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 16) {
+                std::fprintf(stderr, "MATCH bid maker=%llu taker=%llu price=%u qty=%u level_price=%u\n",
+                             (unsigned long long)o.id, (unsigned long long)taker_id, o.price, match_qty, level.price);
+            }
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
 
             remaining          -= match_qty;
@@ -227,6 +242,7 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
                 level_remove(level, idx);
                 id_map_.erase(o.id);
                 pool_.deallocate(idx);
+                if (live_order_count_ > 0) --live_order_count_;
             }
             idx = next;
         }
@@ -244,55 +260,236 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 // ─── hot path ops ─────────────────────────────────────────────────────────
 
 bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
-    if (price >= bids_.size()) return false;   // outside the configured price band
+    // instrumentation counters
+    static std::atomic<uint64_t> cnt_fully_matched{0};
+    static std::atomic<uint64_t> cnt_out_of_band{0};
+    static std::atomic<uint64_t> cnt_pool_exhausted{0};
+
+    // Bootstrap median-of-first-K: if base_ is not yet set, buffer the
+    // first BOOTSTRAP_K add-orders to compute a stable median anchor. This
+    // avoids anchoring the sliding window to an early outlier price.
+    if (!base_set_ && !bootstrapping_) {
+        bootstrap_buf_.emplace_back(id, side, price, qty);
+        if (bootstrap_buf_.size() < BOOTSTRAP_K) return true;
+
+        // Compute median price from buffered samples
+        std::vector<Price> prices;
+        prices.reserve(bootstrap_buf_.size());
+        for (auto &t : bootstrap_buf_) prices.push_back(std::get<2>(t));
+        std::sort(prices.begin(), prices.end());
+        Price median = prices[prices.size() / 2];
+
+        // center median in window
+        Price half = static_cast<Price>(bids_.size() / 2);
+        base_ = (median < half) ? 0 : static_cast<Price>(median - half);
+        base_set_ = true;
+
+        // Flush buffered orders into the live book
+        bootstrapping_ = true;
+        for (auto &t : bootstrap_buf_) {
+            insert_limit_order(std::get<0>(t), std::get<1>(t), std::get<2>(t), std::get<3>(t));
+        }
+        bootstrapping_ = false;
+        bootstrap_buf_.clear();
+        return true;
+    }
+
+    // Convert absolute 'price' into a relative index into the sliding window
+    long rel = to_idx(price); // relative index into bids_/asks_
+    if (!in_band(rel)) {
+        // If the book is still small we can attempt to rebase so this order
+        // fits instead of rejecting; this avoids anchoring to an early
+        // outlier. Only do this when live_order_count_ is small.
+        if (live_order_count_ <= BOOTSTRAP_REBASE_LIMIT) {
+            // compute a new base that centers the requested price
+            Price half = static_cast<Price>(bids_.size() / 2);
+            Price desired_base = (price < half) ? 0 : static_cast<Price>(price - half);
+            rebase_base(desired_base);
+            rel = to_idx(price);
+        }
+        if (!in_band(rel)) {
+            uint64_t ct = cnt_out_of_band.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT oob id=%llu price=%u rel=%ld base=%u band=%zu\n",
+                                      (unsigned long long)id, price, rel, base_, bids_.size());
+            return false; // still out of band
+        }
+    }
+    uint32_t pidx = static_cast<uint32_t>(rel);
 
     Quantity remaining;
 
     if (side == Side::BUY) {
-        remaining = match_against_asks(id, price, qty);
-        if (remaining == 0) return false;
+        // Match against asks using relative index
+        remaining = match_against_asks(id, pidx, qty);
+        if (remaining == 0) {
+            uint64_t ct = cnt_fully_matched.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT matched(id=%llu)\n", (unsigned long long)id);
+            return false;
+        }
 
-        uint32_t idx = pool_.allocate();
-        if (idx == NULL_IDX) return false;     // pool exhausted — drop the order
+        uint32_t slot = pool_.allocate();
+        if (slot == NULL_IDX) {
+            uint64_t ct = cnt_pool_exhausted.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT pool_exhausted id=%llu\n", (unsigned long long)id);
+            return false;     // pool exhausted — drop the order
+        }
 
-        Order& o = pool_[idx];
+        Order& o = pool_[slot];
         o.id    = id;
-        o.price = price;
+        o.price = pidx;                         // store relative index in order
         o.qty   = remaining;
         o.side  = side;
 
-        PriceLevel& level = bids_[price];
-        level_append(level, idx);
-        id_map_.insert(id, idx);
+        PriceLevel& level = bids_[pidx];
+        // store the absolute price on the level for logging
+        if (level.empty()) level.price = price;
+        level_append(level, slot);
+        id_map_.insert(id, slot);
+        ++live_order_count_;
 
-        if (tob_.best_bid == UINT32_MAX || price > tob_.best_bid) {
-            tob_.best_bid = price;
+        if (tob_.best_bid == UINT32_MAX || pidx > tob_.best_bid) {
+            tob_.best_bid = pidx;
             tob_.bid_qty  = level.total_volume;
         }
         return true;
     } else {
-        remaining = match_against_bids(id, price, qty);
-        if (remaining == 0) return false;
+        // SELL side
+        remaining = match_against_bids(id, pidx, qty);
+        if (remaining == 0) {
+            uint64_t ct = cnt_fully_matched.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT matched(id=%llu)\n", (unsigned long long)id);
+            return false;
+        }
 
-        uint32_t idx = pool_.allocate();
-        if (idx == NULL_IDX) return false;
+        uint32_t slot = pool_.allocate();
+        if (slot == NULL_IDX) {
+            uint64_t ct = cnt_pool_exhausted.fetch_add(1, std::memory_order_relaxed);
+            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT pool_exhausted id=%llu\n", (unsigned long long)id);
+            return false;
+        }
 
-        Order& o = pool_[idx];
+        Order& o = pool_[slot];
         o.id    = id;
-        o.price = price;
+        o.price = pidx;
         o.qty   = remaining;
         o.side  = side;
 
-        PriceLevel& level = asks_[price];
-        level_append(level, idx);
-        id_map_.insert(id, idx);
+        PriceLevel& level = asks_[pidx];
+        if (level.empty()) level.price = price;
+        level_append(level, slot);
+        id_map_.insert(id, slot);
+        ++live_order_count_;
 
-        if (tob_.best_ask == UINT32_MAX || price < tob_.best_ask) {
-            tob_.best_ask = price;
+        if (tob_.best_ask == UINT32_MAX || pidx < tob_.best_ask) {
+            tob_.best_ask = pidx;
             tob_.ask_qty  = level.total_volume;
         }
         return true;
     }
+}
+
+void OrderBook::rebase_base(Price new_base) noexcept {
+    if (new_base == base_) return;
+    const size_t N = bids_.size();
+
+    std::vector<PriceLevel> new_bids(N);
+    std::vector<PriceLevel> new_asks(N);
+    std::vector<uint64_t> new_bid_bitmap((N + 63) / 64);
+    std::vector<uint64_t> new_ask_bitmap((N + 63) / 64);
+
+    // Move bids
+    for (size_t idx = 0; idx < N; ++idx) {
+        PriceLevel& lvl = bids_[idx];
+        if (lvl.empty()) continue;
+        Price abs_price = static_cast<Price>(base_ + idx);
+        long new_rel = static_cast<long>(abs_price) - static_cast<long>(new_base);
+        if (new_rel < 0 || new_rel >= static_cast<long>(N)) {
+            // out of new band: drop all orders (shouldn't happen for small rebases)
+            uint32_t j = lvl.head_idx;
+            while (j != NULL_IDX) {
+                uint32_t next = pool_[j].next_idx; // capture before deallocate
+                id_map_.erase(pool_[j].id);
+                pool_.deallocate(j);
+                j = next;
+                if (live_order_count_ > 0) --live_order_count_;
+            }
+            continue;
+        }
+        uint32_t nr = static_cast<uint32_t>(new_rel);
+        // move linked list nodes into new_bids[nr]
+        PriceLevel& dst = new_bids[nr];
+        dst.price = abs_price;
+        uint32_t j = lvl.head_idx;
+        while (j != NULL_IDX) {
+            pool_[j].price = nr; // update stored relative index
+            uint32_t next = pool_[j].next_idx;
+            // append to dst
+            if (dst.head_idx == NULL_IDX) {
+                dst.head_idx = j;
+                pool_[j].prev_idx = NULL_IDX;
+            } else {
+                pool_[dst.tail_idx].next_idx = j;
+                pool_[j].prev_idx = dst.tail_idx;
+            }
+            dst.tail_idx = j;
+            pool_[j].next_idx = NULL_IDX;
+            dst.total_volume += pool_[j].qty;
+            ++dst.order_count;
+            j = next;
+        }
+        new_bid_bitmap[nr >> 6] |= (1ull << (nr & 63));
+    }
+
+    // Move asks (same as bids)
+    for (size_t idx = 0; idx < N; ++idx) {
+        PriceLevel& lvl = asks_[idx];
+        if (lvl.empty()) continue;
+        Price abs_price = static_cast<Price>(base_ + idx);
+        long new_rel = static_cast<long>(abs_price) - static_cast<long>(new_base);
+        if (new_rel < 0 || new_rel >= static_cast<long>(N)) {
+            uint32_t j = lvl.head_idx;
+            while (j != NULL_IDX) {
+                uint32_t next = pool_[j].next_idx;
+                id_map_.erase(pool_[j].id);
+                pool_.deallocate(j);
+                j = next;
+                if (live_order_count_ > 0) --live_order_count_;
+            }
+            continue;
+        }
+        uint32_t nr = static_cast<uint32_t>(new_rel);
+        PriceLevel& dst = new_asks[nr];
+        dst.price = abs_price;
+        uint32_t j = lvl.head_idx;
+        while (j != NULL_IDX) {
+            pool_[j].price = nr;
+            uint32_t next = pool_[j].next_idx;
+            if (dst.head_idx == NULL_IDX) {
+                dst.head_idx = j;
+                pool_[j].prev_idx = NULL_IDX;
+            } else {
+                pool_[dst.tail_idx].next_idx = j;
+                pool_[j].prev_idx = dst.tail_idx;
+            }
+            dst.tail_idx = j;
+            pool_[j].next_idx = NULL_IDX;
+            dst.total_volume += pool_[j].qty;
+            ++dst.order_count;
+            j = next;
+        }
+        new_ask_bitmap[nr >> 6] |= (1ull << (nr & 63));
+    }
+
+    bids_.swap(new_bids);
+    asks_.swap(new_asks);
+    bid_bitmap_.swap(new_bid_bitmap);
+    ask_bitmap_.swap(new_ask_bitmap);
+
+    base_ = new_base;
+
+    // Recompute top-of-book
+    update_best_bid();
+    update_best_ask();
 }
 
 void OrderBook::cancel_order(OrderId id) noexcept {
@@ -339,22 +536,24 @@ bool OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
 
     Order& o     = pool_[idx];
     Side   side  = o.side;
-    Price  price = o.price;
-    PriceLevel& level = (side == Side::BUY) ? bids_[price] : asks_[price];
+    uint32_t rel_price = o.price; // relative index into bids_/asks_
+    PriceLevel& level = (side == Side::BUY) ? bids_[rel_price] : asks_[rel_price];
+    Price abs_price = level.price; // absolute price for logging
 
     if (fill_qty >= o.qty) {
-        logger_.enqueue_trade(Trade{o.id, 0, price, o.qty, rdtsc()});
+        logger_.enqueue_trade(Trade{o.id, 0, abs_price, o.qty, rdtsc()});
         level_remove(level, idx);
         id_map_.erase(id);
         pool_.deallocate(idx);
+        if (live_order_count_ > 0) --live_order_count_;
 
         if (side == Side::BUY) {
-            if (price == tob_.best_bid) {
+            if (rel_price == tob_.best_bid) {
                 if (level.empty()) update_best_bid();
                 else                tob_.bid_qty = level.total_volume;
             }
         } else {
-            if (price == tob_.best_ask) {
+            if (rel_price == tob_.best_ask) {
                 if (level.empty()) update_best_ask();
                 else                tob_.ask_qty = level.total_volume;
             }
@@ -362,13 +561,13 @@ bool OrderBook::execute_order(OrderId id, Quantity fill_qty) noexcept {
         return true;
     }
 
-    logger_.enqueue_trade(Trade{o.id, 0, price, fill_qty, rdtsc()});
+    logger_.enqueue_trade(Trade{o.id, 0, abs_price, fill_qty, rdtsc()});
     o.qty              -= fill_qty;
     level.total_volume -= fill_qty;
 
-    if (side == Side::BUY && price == tob_.best_bid) {
+    if (side == Side::BUY && rel_price == tob_.best_bid) {
         tob_.bid_qty = level.total_volume;
-    } else if (side == Side::SELL && price == tob_.best_ask) {
+    } else if (side == Side::SELL && rel_price == tob_.best_ask) {
         tob_.ask_qty = level.total_volume;
     }
     return false;

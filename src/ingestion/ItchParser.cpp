@@ -59,8 +59,12 @@ namespace Nanomatch {
         uint8_t* cursor  = reinterpret_cast<uint8_t*>(mmap_ptr);
         uint8_t* end_ptr = cursor + file_size;
         uint64_t message_count = 0;
-        uint64_t rejected_price_band = 0;   // diagnostic: orders priced outside [0, price_band)
         uint64_t tracked_adds = 0;          // diagnostic: adds seen for a tracked locate_id
+        uint64_t successful_inserts = 0;    // adds that returned true from insert_limit_order
+        uint64_t execute_calls = 0;         // total 'E' messages seen (for all locates)
+        uint64_t execute_hits  = 0;         // execute_order returned true (order fully removed)
+        std::vector<OrderId> sample_inserts;
+        std::vector<OrderId> sample_execs;
 
         while (cursor < end_ptr) {
             // Bug fix: previously the header (and every message payload cast
@@ -104,9 +108,11 @@ namespace Nanomatch {
                         auto& book = market_books[locate_id];
                         if (!book) book = std::make_unique<OrderBook>(price_band, logger, max_orders);
                         Price px = bswap32(msg->price);
-                        if (px >= price_band) ++rejected_price_band;
-                        if (book->insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, px, bswap32(msg->shares))) {
-                            ref_owner[bswap64(msg->order_id)] = book.get();
+                        OrderId oid = bswap64(msg->order_id);
+                        if (book->insert_limit_order(oid, (msg->side == 'S') ? Side::SELL : Side::BUY, px, bswap32(msg->shares))) {
+                            ref_owner[oid] = book.get();
+                            ++successful_inserts;
+                            if (sample_inserts.size() < 16) sample_inserts.push_back(oid);
                         }
                     }
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
@@ -122,9 +128,11 @@ namespace Nanomatch {
                         auto& book = market_books[locate_id];
                         if (!book) book = std::make_unique<OrderBook>(price_band, logger, max_orders);
                         Price px = bswap32(msg->price);
-                        if (px >= price_band) ++rejected_price_band;
-                        if (book->insert_limit_order(bswap64(msg->order_id), (msg->side == 'S') ? Side::SELL : Side::BUY, px, bswap32(msg->shares))) {
-                            ref_owner[bswap64(msg->order_id)] = book.get();
+                        OrderId oid = bswap64(msg->order_id);
+                        if (book->insert_limit_order(oid, (msg->side == 'S') ? Side::SELL : Side::BUY, px, bswap32(msg->shares))) {
+                            ref_owner[oid] = book.get();
+                            ++successful_inserts;
+                            if (sample_inserts.size() < 16) sample_inserts.push_back(oid);
                         }
                     }
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
@@ -136,10 +144,14 @@ namespace Nanomatch {
                     auto* msg = reinterpret_cast<ItchOrderExecutedMessage*>(payload);
                     OrderId id = bswap64(msg->order_id);
                     auto it = ref_owner.find(id);
+                    ++execute_calls;
                     if (it != ref_owner.end()) {
                         if (it->second->execute_order(id, bswap32(msg->shares))) {
                             ref_owner.erase(it);
+                            ++execute_hits;
                         }
+                    } else {
+                        if (sample_execs.size() < 16) sample_execs.push_back(id);
                     }
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
@@ -206,22 +218,23 @@ namespace Nanomatch {
         munmap(mmap_ptr, file_size);
         close(fd);
 
-        // Diagnostic: this is what was silently causing empty trade reports.
-        // insert_limit_order() rejects any order priced >= price_band with
-        // no logging at all (it's a noexcept hot-path fast return). If your
-        // ticker's actual price is above what --price-band covers, every
-        // single order for it gets dropped, ref_owner never gets populated,
-        // so the later 'E' (Order Executed) messages that reference those
-        // order ids find nothing in ref_owner and log zero trades. The run
-        // "succeeds" and produces an empty report instead of an error.
-        if (tracked_adds > 0 && rejected_price_band > 0) {
-            std::cerr << "[Warning] " << rejected_price_band << " / " << tracked_adds
-                      << " add-order messages for tracked ticker(s) were priced outside "
-                      << "the configured --price-band (" << price_band
-                      << " ticks, i.e. up to $" << (price_band / 10000.0)
-                      << " at ITCH's $0.0001 scale) and were dropped. "
-                      << "If this ticker trades above that, rerun with a larger --price-band.\n";
-        } else if (tracked_adds == 0) {
+        // If there were no tracked adds at all, warn the user. The previous
+        // implementation also counted orders that fell outside a fixed absolute
+        // --price-band value; that check is no longer valid because OrderBook
+        // uses a sliding window anchored to the first observed price.
+        // Print diagnostics about how many adds/inserts/executions we saw
+        std::cerr << "[Diagnostic] tracked_adds=" << tracked_adds
+                  << " successful_inserts=" << successful_inserts
+                  << " execute_calls=" << execute_calls
+                  << " execute_hits=" << execute_hits << "\n";
+
+        std::cerr << "[Diagnostic] sample_inserts: ";
+        for (auto id : sample_inserts) std::cerr << id << ' ';
+        std::cerr << "\n[Diagnostic] sample_execs: ";
+        for (auto id : sample_execs) std::cerr << id << ' ';
+        std::cerr << '\n';
+
+        if (tracked_adds == 0) {
             std::cerr << "[Warning] No add-order messages were seen for the tracked locate_id(s). "
                       << "Either that stock_locate had no activity in this file, or it's the wrong "
                       << "locate_id for the ticker you meant -- dump the 'R' Stock Directory messages "
