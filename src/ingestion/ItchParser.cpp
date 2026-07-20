@@ -156,6 +156,24 @@ namespace Nanomatch {
                     latency_samples.push_back(Nanomatch::rdtsc() - t0);
                     break;
                 }
+                case 'C': {
+                    if (body_avail < sizeof(ItchOrderExecutedWithPriceMessage)) { break; }
+                    uint64_t t0 = Nanomatch::rdtsc();
+                    auto* msg = reinterpret_cast<ItchOrderExecutedWithPriceMessage*>(payload);
+                    OrderId id = bswap64(msg->order_id);
+                    auto it = ref_owner.find(id);
+                    ++execute_calls;
+                    if (it != ref_owner.end()) {
+                        if (it->second->execute_order(id, bswap32(msg->shares))) {
+                            ref_owner.erase(it);
+                            ++execute_hits;
+                        }
+                    } else {
+                        if (sample_execs.size() < 16) sample_execs.push_back(id);
+                    }
+                    latency_samples.push_back(Nanomatch::rdtsc() - t0);
+                    break;
+                }
                 case 'X': {
                     if (body_avail < sizeof(ItchOrderCancelMessage)) { break; }
                     uint64_t t0 = Nanomatch::rdtsc();

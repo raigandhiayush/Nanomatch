@@ -1,0 +1,27 @@
+2026-07-20T23:43:05+05:30
+Running ./build/benchmarks/engine_benchmark
+Run on (4 X 4100 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x2)
+  L1 Instruction 32 KiB (x2)
+  L2 Unified 1280 KiB (x2)
+  L3 Unified 6144 KiB (x1)
+Load Average: 1.17, 1.22, 1.04
+***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+***WARNING*** ASLR is enabled, the results may have unreproducible noise in them.
+
+ Performance counter stats for './build/benchmarks/engine_benchmark':
+
+        68,768,810      cache-references                                                      
+        57,085,440      cache-misses                                                          
+     5,885,300,104      L1-dcache-loads                                                       
+        64,053,114      L1-dcache-load-misses                                                 
+         6,016,451      LLC-loads                                                             
+         4,738,642      LLC-load-misses                                                       
+
+       2.078375756 seconds time elapsed
+
+       1.455238000 seconds user
+       0.720925000 seconds sys
+
+

@@ -63,7 +63,7 @@ int main(int argc, char* argv[]) {
     const std::string itch_file = argv[1];
     const std::string log_file  = (argc > 2) ? argv[2] : "build/trade_report.txt";
 
-    size_t price_band = 16'000'000;   // ~111MB/ticker instead of ~918MB at PRICE_BAND defaults
+    size_t price_band = 2'000'000;   // ~111MB/ticker instead of ~918MB at PRICE_BAND defaults
     size_t max_orders  = 65'536;
 
     std::unordered_set<uint16_t> allowed_locates;
