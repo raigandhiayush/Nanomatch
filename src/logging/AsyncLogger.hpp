@@ -42,11 +42,6 @@ public:
 
     // Hot path — completely non-blocking, overwrite-safe.
     inline void enqueue_trade(const Trade& t) noexcept {
-        // Debug: trace when trades are enqueued
-        // Note: kept lightweight to avoid perturbing timing too much
-        // Uncomment the fprintf below for debugging if needed.
-        std::fprintf(stderr, "ENQ trade maker=%llu taker=%llu price=%u qty=%u\n",
-                     (unsigned long long)t.maker_id, (unsigned long long)t.taker_id, t.price, t.qty);
         if (!queue_.emplace(t)) {
             dropped_.fetch_add(1, std::memory_order_relaxed); // drop, don't stall matching
         }

@@ -221,14 +221,6 @@ private:
     uint32_t live_order_count_ {0};
     static constexpr size_t BOOTSTRAP_REBASE_LIMIT = 64; // tolerate rebases while book is small
 
-    // Simple median-of-first-K bootstrap buffer (Option A) to avoid anchoring
-    // to a very early outlier. While base_set_ == false the first K add-orders
-    // are buffered; once K samples are collected the median price is used to
-    // anchor base_ and the buffered orders are inserted into the book.
-    static constexpr size_t BOOTSTRAP_K = 8;
-    bool bootstrapping_ {false};
-    std::vector<std::tuple<OrderId, Side, Price, Quantity>> bootstrap_buf_;
-
     // Rebase / slide the window to a new base. Moves all existing levels
     // and updates order.price indices. Intended for rare bootstrap use.
     void rebase_base(Price new_base) noexcept;

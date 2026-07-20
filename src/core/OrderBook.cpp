@@ -164,7 +164,6 @@ void OrderBook::update_best_ask() noexcept {
 
 Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity qty) noexcept {
     Quantity remaining = qty;
-    static std::atomic<uint64_t> debug_trades{0};
 
     while (remaining > 0) {
         Price best = tob_.best_ask;
@@ -179,11 +178,6 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
             if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
-            uint64_t ct = debug_trades.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 16) {
-                std::fprintf(stderr, "MATCH ask maker=%llu taker=%llu price=%u qty=%u level_price=%u\n",
-                             (unsigned long long)o.id, (unsigned long long)taker_id, o.price, match_qty, level.price);
-            }
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
 
             remaining        -= match_qty;
@@ -211,7 +205,6 @@ Quantity OrderBook::match_against_asks(OrderId taker_id, Price limit, Quantity q
 
 Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity qty) noexcept {
     Quantity remaining = qty;
-    static std::atomic<uint64_t> debug_trades_b{0};
 
     while (remaining > 0) {
         Price best = tob_.best_bid;
@@ -227,11 +220,6 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
             if (next != NULL_IDX) __builtin_prefetch(&pool_[next], 0, 1);
 
             Quantity match_qty = std::min(remaining, o.qty);
-            uint64_t ct = debug_trades_b.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 16) {
-                std::fprintf(stderr, "MATCH bid maker=%llu taker=%llu price=%u qty=%u level_price=%u\n",
-                             (unsigned long long)o.id, (unsigned long long)taker_id, o.price, match_qty, level.price);
-            }
             logger_.enqueue_trade(Trade{o.id, taker_id, level.price, match_qty, rdtsc()});
 
             remaining          -= match_qty;
@@ -260,38 +248,20 @@ Quantity OrderBook::match_against_bids(OrderId taker_id, Price limit, Quantity q
 // ─── hot path ops ─────────────────────────────────────────────────────────
 
 bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity qty) noexcept {
-    // instrumentation counters
-    static std::atomic<uint64_t> cnt_fully_matched{0};
-    static std::atomic<uint64_t> cnt_out_of_band{0};
-    static std::atomic<uint64_t> cnt_pool_exhausted{0};
-
-    // Bootstrap median-of-first-K: if base_ is not yet set, buffer the
-    // first BOOTSTRAP_K add-orders to compute a stable median anchor. This
-    // avoids anchoring the sliding window to an early outlier price.
-    if (!base_set_ && !bootstrapping_) {
-        bootstrap_buf_.emplace_back(id, side, price, qty);
-        if (bootstrap_buf_.size() < BOOTSTRAP_K) return true;
-
-        // Compute median price from buffered samples
-        std::vector<Price> prices;
-        prices.reserve(bootstrap_buf_.size());
-        for (auto &t : bootstrap_buf_) prices.push_back(std::get<2>(t));
-        std::sort(prices.begin(), prices.end());
-        Price median = prices[prices.size() / 2];
-
-        // center median in window
+    // Anchor the sliding window from the very first order this book ever
+    // sees, centered so that price sits mid-array. If that anchor turns out
+    // to be a bad fit for a subsequent early order, in_band()/rebase_base()
+    // below (gated by BOOTSTRAP_REBASE_LIMIT) already re-centers the window
+    // while the book is still small -- so there's no need to hold orders
+    // back first. (This used to buffer the first 8 orders before anchoring
+    // at their median, but that meant any book that saw fewer than 8 orders
+    // in its entire lifetime never anchored at all and silently never
+    // traded -- a real problem for thin/illiquid symbols, and the reason a
+    // 3-order unit test never saw any fills.)
+    if (!base_set_) {
         Price half = static_cast<Price>(bids_.size() / 2);
-        base_ = (median < half) ? 0 : static_cast<Price>(median - half);
+        base_ = (price < half) ? 0 : static_cast<Price>(price - half);
         base_set_ = true;
-
-        // Flush buffered orders into the live book
-        bootstrapping_ = true;
-        for (auto &t : bootstrap_buf_) {
-            insert_limit_order(std::get<0>(t), std::get<1>(t), std::get<2>(t), std::get<3>(t));
-        }
-        bootstrapping_ = false;
-        bootstrap_buf_.clear();
-        return true;
     }
 
     // Convert absolute 'price' into a relative index into the sliding window
@@ -308,9 +278,6 @@ bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
             rel = to_idx(price);
         }
         if (!in_band(rel)) {
-            uint64_t ct = cnt_out_of_band.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT oob id=%llu price=%u rel=%ld base=%u band=%zu\n",
-                                      (unsigned long long)id, price, rel, base_, bids_.size());
             return false; // still out of band
         }
     }
@@ -322,15 +289,11 @@ bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
         // Match against asks using relative index
         remaining = match_against_asks(id, pidx, qty);
         if (remaining == 0) {
-            uint64_t ct = cnt_fully_matched.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT matched(id=%llu)\n", (unsigned long long)id);
-            return false;
+            return false; // fully matched; nothing rests on the book
         }
 
         uint32_t slot = pool_.allocate();
         if (slot == NULL_IDX) {
-            uint64_t ct = cnt_pool_exhausted.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT pool_exhausted id=%llu\n", (unsigned long long)id);
             return false;     // pool exhausted — drop the order
         }
 
@@ -356,15 +319,11 @@ bool OrderBook::insert_limit_order(OrderId id, Side side, Price price, Quantity 
         // SELL side
         remaining = match_against_bids(id, pidx, qty);
         if (remaining == 0) {
-            uint64_t ct = cnt_fully_matched.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT matched(id=%llu)\n", (unsigned long long)id);
-            return false;
+            return false; // fully matched; nothing rests on the book
         }
 
         uint32_t slot = pool_.allocate();
         if (slot == NULL_IDX) {
-            uint64_t ct = cnt_pool_exhausted.fetch_add(1, std::memory_order_relaxed);
-            if (ct < 8) std::fprintf(stderr, "INSERT_REJECT pool_exhausted id=%llu\n", (unsigned long long)id);
             return false;
         }
 
